@@ -17,6 +17,10 @@ export const usersJsonSchema = {
       // Only meaningful when role === 'admin' — §4.2 requires granular checks, never a
       // single global "is admin" boolean, so an admin's actual access is this list.
       permissions: { bsonType: 'array', items: { bsonType: 'string' } },
+      // Only meaningful when role === 'staff' — links the login to the employees record
+      // that identifies which appointments/schedule/overview belong to them, so the admin
+      // panel can be scoped to just their own data (see requirePermissionOrStaffSelf).
+      employeeId: { bsonType: ['objectId', 'null'] },
       isActive: { bsonType: 'bool' },
       emailVerified: { bsonType: 'bool' },
       referralCode: { bsonType: ['string', 'null'] },

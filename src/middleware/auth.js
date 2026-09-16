@@ -68,6 +68,25 @@ export function requirePermission(...permissions) {
   };
 }
 
+// Lets a linked staff account (role 'staff', SETTINGS.employeeId set) into a handful of
+// read endpoints an admin with `permissions` would also need — appointments list,
+// overview stats, trends, availability. The route handler is still responsible for
+// scoping the actual query to req.user.employeeId; this middleware only decides who gets
+// in, never what they see once inside. A staff account with no employeeId (shouldn't
+// happen — invites require one) is refused rather than silently seeing nothing scoped.
+export function requirePermissionOrStaffSelf(...permissions) {
+  return (req, res, next) => {
+    if (!req.user) return next(unauthorized());
+    if (req.user.role === ROLES.ADMIN) {
+      const granted = new Set(req.user.permissions || []);
+      if (!permissions.every((p) => granted.has(p))) return next(forbidden());
+      return next();
+    }
+    if (req.user.role === ROLES.STAFF && req.user.employeeId) return next();
+    return next(forbidden());
+  };
+}
+
 // IDOR guard (§5.3) — for routes shaped like /me/... or scoped by owner id, confirms
 // the authenticated user matches the resource owner unless they're an admin.
 export function requireOwnerOrAdmin(getOwnerId) {

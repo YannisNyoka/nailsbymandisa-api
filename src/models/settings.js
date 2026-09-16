@@ -133,7 +133,12 @@ export const DEFAULT_SETTINGS = {
     whatsapp: '+27766878843',
     email: 'nailsbymandisa@gmail.com',
   },
-  socialLinks: { instagram: '', facebook: '', tiktok: '' },
+  socialLinks: {
+    instagram: 'https://instagram.com/nailsbymandisa',
+    facebook: 'https://web.facebook.com/nailsbymandisa/',
+    tiktok: 'https://www.tiktok.com/@mandisa_dlangamandla',
+    twitter: 'https://x.com/NailsByMandisa',
+  },
   hours: Object.fromEntries(
     WEEKDAYS.map((d) => [d, d === 'sun' ? { closed: true, open: null, close: null } : { closed: false, open: '09:00', close: '17:00' }])
   ),

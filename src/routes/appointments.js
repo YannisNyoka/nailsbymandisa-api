@@ -4,7 +4,7 @@ import * as bookingService from '../services/bookingService.js';
 import { appointmentsCollection } from '../models/appointments.js';
 import { usersCollection } from '../models/users.js';
 import { validate } from '../middleware/validate.js';
-import { authenticate, optionalAuthenticate, requirePermission } from '../middleware/auth.js';
+import { authenticate, optionalAuthenticate, requirePermission, requirePermissionOrStaffSelf } from '../middleware/auth.js';
 import { checkoutLimiter } from '../middleware/rateLimit.js';
 import { PERMISSIONS, ROLES, PAGINATION, ANY_AVAILABLE_EMPLOYEE } from '../config/constants.js';
 import { forbidden } from '../utils/AppError.js';
@@ -112,10 +112,16 @@ router.get('/me', authenticate, validate(listQuerySchema, 'query'), async (req, 
   }
 });
 
-// Admin-only full list, filterable/paginated for the appointments table (§4.12).
-router.get('/', authenticate, requirePermission(PERMISSIONS.MANAGE_APPOINTMENTS), validate(listQuerySchema, 'query'), async (req, res, next) => {
+// Admin-only full list, filterable/paginated for the appointments table (§4.12). A
+// linked staff account also reaches this route (requirePermissionOrStaffSelf) but has
+// its `employeeId` filter forced to its own record below, regardless of what the
+// `employeeId` query param says — the frontend hides the staff filter for them, but the
+// server never trusts that; this is the actual scoping boundary.
+router.get('/', authenticate, requirePermissionOrStaffSelf(PERMISSIONS.MANAGE_APPOINTMENTS), validate(listQuerySchema, 'query'), async (req, res, next) => {
   try {
-    const { page, pageSize, date, status, employeeId, serviceId, clientSearch } = req.query;
+    const { page, pageSize, date, status, serviceId, clientSearch } = req.query;
+    const isStaff = req.user.role === ROLES.STAFF;
+    const employeeId = isStaff ? req.user.employeeId : req.query.employeeId;
     const filter = {};
     if (date) filter.date = date;
     if (status) filter.status = status;

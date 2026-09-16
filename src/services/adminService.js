@@ -16,14 +16,28 @@ const netCents = (p) => p.amountCents - p.refundedAmountCents;
 // application code (consistent with every other list/report in this codebase) rather
 // than a Mongo aggregation pipeline — fine at this app's scale, and keeps the fake-db
 // test double usable for these reads too.
-export async function getOverviewStats() {
+// `employeeId` scopes every figure to one staff member's own bookings/revenue — used for
+// the staff-facing overview (§ staff-scoped admin access), which must never show
+// salon-wide numbers or other staff/clients' activity to a non-admin.
+export async function getOverviewStats({ employeeId } = {}) {
   const today = todayDateString();
-  const [appointments, payments, clientCount, recentActivity] = await Promise.all([
-    (await appointmentsCollection().find({})).toArray(),
+  const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
+  const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
+
+  const [appointments, allPayments, clientCount, recentActivity] = await Promise.all([
+    (await appointmentsCollection().find(appointmentsFilter)).toArray(),
     (await paymentsCollection().find({})).toArray(),
-    (await usersCollection().find({ role: ROLES.CUSTOMER })).toArray().then((u) => u.length),
-    listActivity({ page: 1, pageSize: 10 }),
+    employeeObjectId ? Promise.resolve(null) : (await usersCollection().find({ role: ROLES.CUSTOMER })).toArray().then((u) => u.length),
+    employeeObjectId ? Promise.resolve({ entries: [] }) : listActivity({ page: 1, pageSize: 10 }),
   ]);
+
+  // A staff member's revenue only counts payments tied to their own appointments — join
+  // in application code rather than a query per payment, same full-scan style as the rest
+  // of this file.
+  const appointmentIds = new Set(appointments.map((a) => String(a._id)));
+  const payments = employeeObjectId
+    ? allPayments.filter((p) => p.appointmentId && appointmentIds.has(String(p.appointmentId)))
+    : allPayments;
 
   const appointmentsToday = appointments.filter(
     (a) => a.date === today && [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED].includes(a.status)
@@ -68,12 +82,19 @@ const TREND_METRICS = new Set(['revenue', 'bookings']);
 // the UI); bucketing is by the appointment's own `date` for bookings, and by payment
 // `createdAt` (business-tz) for revenue — same full-scan-then-reduce style as
 // getOverviewStats(), fine at this app's scale.
-export async function getTrend({ metric, days = 7 }) {
+export async function getTrend({ metric, days = 7, employeeId }) {
   if (!TREND_METRICS.has(metric)) throw badRequest(`Unknown trend metric: ${metric}`);
   const dateStrings = lastNDateStrings(days);
+  const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
+  const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
 
   if (metric === 'revenue') {
-    const payments = (await (await paymentsCollection().find({})).toArray()).filter((p) => PAID_STATUSES.includes(p.status));
+    const scopedAppointmentIds = employeeObjectId
+      ? new Set((await (await appointmentsCollection().find(appointmentsFilter)).toArray()).map((a) => String(a._id)))
+      : null;
+    const payments = (await (await paymentsCollection().find({})).toArray()).filter(
+      (p) => PAID_STATUSES.includes(p.status) && (!scopedAppointmentIds || (p.appointmentId && scopedAppointmentIds.has(String(p.appointmentId))))
+    );
     const byDate = new Map(dateStrings.map((d) => [d, 0]));
     for (const p of payments) {
       const d = dateStringFor(p.createdAt);
@@ -82,7 +103,7 @@ export async function getTrend({ metric, days = 7 }) {
     return { metric, days, points: dateStrings.map((date) => ({ date, revenueCents: byDate.get(date) })) };
   }
 
-  const appointments = await (await appointmentsCollection().find({})).toArray();
+  const appointments = await (await appointmentsCollection().find(appointmentsFilter)).toArray();
   const byDate = new Map(dateStrings.map((d) => [d, { booked: 0, cancelled: 0, completed: 0 }]));
   for (const a of appointments) {
     const bucket = byDate.get(a.date);

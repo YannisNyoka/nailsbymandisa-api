@@ -5,10 +5,10 @@ import * as adminUsersService from '../services/adminUsersService.js';
 import { listActivity, logActivity } from '../services/activityLogService.js';
 import * as clientNotificationsService from '../services/clientNotificationsService.js';
 import { validate } from '../middleware/validate.js';
-import { authenticate, requirePermission } from '../middleware/auth.js';
+import { authenticate, requirePermission, requirePermissionOrStaffSelf } from '../middleware/auth.js';
 import { messagingLimiter } from '../middleware/rateLimit.js';
 import { sendSms } from '../config/smsClient.js';
-import { PERMISSIONS, PAGINATION } from '../config/constants.js';
+import { PERMISSIONS, PAGINATION, ROLES } from '../config/constants.js';
 import { badRequest, notFound } from '../utils/AppError.js';
 import { usersCollection } from '../models/users.js';
 import { ObjectId } from 'mongodb';
@@ -17,9 +17,10 @@ export const router = Router();
 
 router.use(authenticate);
 
-router.get('/overview', requirePermission(PERMISSIONS.VIEW_ANALYTICS), async (req, res, next) => {
+router.get('/overview', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), async (req, res, next) => {
   try {
-    res.json(await adminService.getOverviewStats());
+    const employeeId = req.user.role === ROLES.STAFF ? req.user.employeeId : undefined;
+    res.json(await adminService.getOverviewStats({ employeeId }));
   } catch (err) {
     next(err);
   }
@@ -30,9 +31,10 @@ const trendQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(7),
 });
 
-router.get('/trends', requirePermission(PERMISSIONS.VIEW_ANALYTICS), validate(trendQuerySchema, 'query'), async (req, res, next) => {
+router.get('/trends', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), validate(trendQuerySchema, 'query'), async (req, res, next) => {
   try {
-    res.json(await adminService.getTrend(req.query));
+    const employeeId = req.user.role === ROLES.STAFF ? req.user.employeeId : undefined;
+    res.json(await adminService.getTrend({ ...req.query, employeeId }));
   } catch (err) {
     next(err);
   }

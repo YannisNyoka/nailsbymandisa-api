@@ -2,15 +2,17 @@ import { Router } from 'express';
 import { z } from 'zod';
 import * as availabilityService from '../services/availabilityService.js';
 import { validate } from '../middleware/validate.js';
-import { authenticate, requirePermission } from '../middleware/auth.js';
-import { PERMISSIONS } from '../config/constants.js';
+import { authenticate, requirePermission, requirePermissionOrStaffSelf } from '../middleware/auth.js';
+import { PERMISSIONS, ROLES } from '../config/constants.js';
 
 export const router = Router();
 
 // Admin-only: blocked-slot reasons are internal notes, and this is a different surface
 // from the customer-facing "what times can I book" endpoint (built with the booking
 // engine in step 4), which derives availability from this data without exposing it raw.
-router.use(authenticate, requirePermission(PERMISSIONS.MANAGE_AVAILABILITY));
+// GET is also reachable by a linked staff account (for their own schedule view), scoped
+// to their own employeeId below; every write stays admin-permission-only.
+router.use(authenticate);
 
 const listQuerySchema = z.object({
   employeeId: z.string().optional(),
@@ -24,13 +26,17 @@ const listQuerySchema = z.object({
     .optional(),
 });
 
-router.get('/', validate(listQuerySchema, 'query'), async (req, res, next) => {
+router.get('/', requirePermissionOrStaffSelf(PERMISSIONS.MANAGE_AVAILABILITY), validate(listQuerySchema, 'query'), async (req, res, next) => {
   try {
-    res.json({ blocks: await availabilityService.listAvailability(req.query) });
+    const isStaff = req.user.role === ROLES.STAFF;
+    const employeeId = isStaff ? req.user.employeeId : req.query.employeeId;
+    res.json({ blocks: await availabilityService.listAvailability({ ...req.query, employeeId }) });
   } catch (err) {
     next(err);
   }
 });
+
+router.use(requirePermission(PERMISSIONS.MANAGE_AVAILABILITY));
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);

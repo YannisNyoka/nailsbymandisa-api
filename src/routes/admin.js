@@ -165,12 +165,19 @@ router.get(
   }
 );
 
-const inviteAdminUserSchema = z.object({
-  email: z.string().email(),
-  firstName: z.string().min(1).max(80).optional(),
-  lastName: z.string().min(1).max(80).optional(),
-  permissions: z.array(z.enum(Object.values(PERMISSIONS))).default([]),
-});
+const inviteAdminUserSchema = z
+  .object({
+    email: z.string().email(),
+    firstName: z.string().min(1).max(80).optional(),
+    lastName: z.string().min(1).max(80).optional(),
+    permissions: z.array(z.enum(Object.values(PERMISSIONS))).default([]),
+    role: z.enum([ROLES.ADMIN, ROLES.STAFF]).default(ROLES.ADMIN),
+    employeeId: z.string().optional(),
+  })
+  .refine((v) => v.role !== ROLES.STAFF || Boolean(v.employeeId), {
+    message: 'employeeId is required for a staff account.',
+    path: ['employeeId'],
+  });
 
 router.post(
   '/users',
@@ -179,9 +186,10 @@ router.post(
   async (req, res, next) => {
     try {
       const adminUser = await adminUsersService.inviteAdminUser(req.body);
+      const roleLabel = adminUser.role === ROLES.STAFF ? 'staff' : 'admin';
       await logActivity({
         type: 'admin_user_invited',
-        message: `${adminUser.firstName} ${adminUser.lastName} (${adminUser.email}) was given admin access`,
+        message: `${adminUser.firstName} ${adminUser.lastName} (${adminUser.email}) was given ${roleLabel} access`,
         actorUserId: req.user._id,
       });
       res.status(201).json({ adminUser });

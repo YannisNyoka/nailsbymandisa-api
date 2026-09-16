@@ -4,7 +4,7 @@ import * as bookingService from '../services/bookingService.js';
 import { appointmentsCollection } from '../models/appointments.js';
 import { usersCollection } from '../models/users.js';
 import { validate } from '../middleware/validate.js';
-import { authenticate, optionalAuthenticate, requirePermission, requirePermissionOrStaffSelf } from '../middleware/auth.js';
+import { authenticate, optionalAuthenticate, requirePermissionOrStaffSelf } from '../middleware/auth.js';
 import { checkoutLimiter } from '../middleware/rateLimit.js';
 import { PERMISSIONS, ROLES, PAGINATION, ANY_AVAILABLE_EMPLOYEE } from '../config/constants.js';
 import { forbidden } from '../utils/AppError.js';

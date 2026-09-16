@@ -182,6 +182,34 @@ describe('GET /api/appointments (admin list)', () => {
     expect(loggedInRow.clientName).toEqual(expect.any(String));
     expect(loggedInRow.clientEmail).toEqual(expect.any(String));
   });
+
+  it("a linked staff account only ever sees its own employeeId's rows, even if it asks for another", async () => {
+    const service = await createTestService();
+    const myEmployee = await createTestEmployee();
+    const otherEmployee = await createTestEmployee();
+    const { accessToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    await request(app).post('/api/appointments').set('Authorization', `Bearer ${accessToken}`).send({
+      serviceIds: [String(service._id)], date: DATE, startTime: '09:00', employeeId: String(myEmployee._id),
+    });
+    await request(app).post('/api/appointments').set('Authorization', `Bearer ${accessToken}`).send({
+      serviceIds: [String(service._id)], date: DATE, startTime: '11:00', employeeId: String(otherEmployee._id),
+    });
+
+    const { accessToken: staffToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
+    // Client-supplied employeeId query param must be ignored server-side, not just hidden client-side.
+    const res = await request(app)
+      .get(`/api/appointments?employeeId=${otherEmployee._id}`)
+      .set('Authorization', `Bearer ${staffToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.appointments[0].startTime).toBe('09:00');
+  });
+
+  it('rejects a staff account with no linked employeeId', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: null });
+    const res = await request(app).get('/api/appointments').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(403);
+  });
 });
 
 describe('GET /api/appointments/slots', () => {

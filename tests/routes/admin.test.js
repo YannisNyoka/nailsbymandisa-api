@@ -7,6 +7,7 @@ import { createUserAndToken } from '../helpers/testAuth.js';
 import * as bookingService from '../../src/services/bookingService.js';
 import * as paymentsService from '../../src/services/paymentsService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
+import { usersCollection, usersIndexes } from '../../src/models/users.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
 import { todayDateString } from '../../src/utils/businessTime.js';
 
@@ -80,6 +81,48 @@ describe('GET /api/admin/overview', () => {
     const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${adminToken}`);
     expect(res.body.cancellationsCount).toBe(1);
     expect(res.body.noShowsCount).toBe(1);
+  });
+});
+
+describe('GET /api/admin/overview — staff scoping', () => {
+  it("only counts a staff account's own bookings/revenue, never the whole salon's", async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService({ priceCents: 30000 });
+    const myEmployee = await createTestEmployee();
+    const otherEmployee = await createTestEmployee();
+
+    const mine = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(myEmployee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    const minePayment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: mine._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: { createCheckout: async () => ({ id: 'c1', redirectUrl: 'https://x' }) },
+    });
+    await paymentsService.handlePaymentSucceeded({ paymentId: minePayment._id, yocoPaymentId: 'pay_mine' });
+
+    const theirs = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(otherEmployee._id), serviceIds: [String(service._id)], date: DATE, startTime: '11:00',
+    });
+    const theirsPayment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: theirs._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: { createCheckout: async () => ({ id: 'c2', redirectUrl: 'https://x' }) },
+    });
+    await paymentsService.handlePaymentSucceeded({ paymentId: theirsPayment._id, yocoPaymentId: 'pay_theirs' });
+
+    const { accessToken: staffToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
+    const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${staffToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.upcomingConfirmed).toBe(1);
+    expect(res.body.netRevenueCents).toBe(minePayment.amountCents);
+    expect(res.body.recentActivity).toEqual([]);
+  });
+
+  it('rejects a staff account with no linked employeeId', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: null });
+    const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(403);
   });
 });
 
@@ -282,6 +325,57 @@ describe('admin user management (/api/admin/users)', () => {
       .set('Authorization', `Bearer ${accessToken}`)
       .send({ permissions: [] });
     expect(res.status).toBe(409);
+  });
+
+  it('invites a staff account linked to an employee record, scoped with no permissions', async () => {
+    const { accessToken } = await manager();
+    const employee = await createTestEmployee();
+    const inviteRes = await request(app)
+      .post('/api/admin/users')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ email: 'staffer@example.com', firstName: 'Staff', lastName: 'Er', role: ROLES.STAFF, employeeId: String(employee._id) });
+    expect(inviteRes.status).toBe(201);
+    expect(inviteRes.body.adminUser.role).toBe(ROLES.STAFF);
+    expect(inviteRes.body.adminUser.permissions).toEqual([]);
+    expect(String(inviteRes.body.adminUser.employeeId)).toBe(String(employee._id));
+
+    const listRes = await request(app).get('/api/admin/users').set('Authorization', `Bearer ${accessToken}`);
+    expect(listRes.body.adminUsers.some((u) => u.email === 'staffer@example.com')).toBe(true);
+  });
+
+  // Regression for a real bug found via manual end-to-end verification: inviteAdminUser
+  // used to hardcode `referralCode: null` for every brand-new account. referralCode is
+  // unique+sparse in real Mongo, but a sparse index still indexes an explicit null (it
+  // only skips a genuinely *missing* field) — so the second-ever invite of a brand-new
+  // admin/staff account would fail with E11000 in production. Enforced here by actually
+  // registering usersIndexes against the fake DB, which every other test in this file
+  // skips (that's exactly why this went undetected before).
+  it('lets two different brand-new accounts be invited back to back without a referralCode collision', async () => {
+    await usersCollection().createIndexes(usersIndexes);
+    const { accessToken } = await manager();
+
+    const first = await request(app)
+      .post('/api/admin/users')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ email: 'first-invite@example.com', firstName: 'First', lastName: 'Invite', permissions: [] });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post('/api/admin/users')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ email: 'second-invite@example.com', firstName: 'Second', lastName: 'Invite', permissions: [] });
+    expect(second.status).toBe(201);
+    expect(second.body.adminUser.referralCode).toEqual(expect.any(String));
+    expect(second.body.adminUser.referralCode).not.toBe(first.body.adminUser.referralCode);
+  });
+
+  it('rejects a staff invite with no employeeId', async () => {
+    const { accessToken } = await manager();
+    const res = await request(app)
+      .post('/api/admin/users')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ email: 'nolinked@example.com', firstName: 'No', lastName: 'Link', role: ROLES.STAFF });
+    expect(res.status).toBe(400);
   });
 
   it('revokes admin access, and blocks self-revoke', async () => {

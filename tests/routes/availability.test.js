@@ -3,6 +3,7 @@ import { createApp } from '../../src/app.js';
 import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
 import { createUserAndToken } from '../helpers/testAuth.js';
+import { createTestEmployee } from '../helpers/fixtures.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
 
 const app = createApp();
@@ -75,5 +76,33 @@ describe('availability blocking', () => {
 
     const notFoundRes = await request(app).delete(`/api/availability/${id}`).set('Authorization', `Bearer ${token}`);
     expect(notFoundRes.status).toBe(404);
+  });
+});
+
+describe('availability — staff scoping', () => {
+  it("a linked staff account can read its own blocks but not another staff member's, and can't write", async () => {
+    const token = await adminToken();
+    const myEmployee = await createTestEmployee();
+    const otherEmployee = await createTestEmployee();
+    await request(app).post('/api/availability').set('Authorization', `Bearer ${token}`).send({
+      employeeId: String(myEmployee._id), date: '2026-01-05', startTime: '10:00', endTime: '12:00',
+    });
+    await request(app).post('/api/availability').set('Authorization', `Bearer ${token}`).send({
+      employeeId: String(otherEmployee._id), date: '2026-01-05', startTime: '13:00', endTime: '14:00',
+    });
+
+    const { accessToken: staffToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
+    const listRes = await request(app)
+      .get(`/api/availability?employeeId=${otherEmployee._id}`)
+      .set('Authorization', `Bearer ${staffToken}`);
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.blocks).toHaveLength(1);
+    expect(String(listRes.body.blocks[0].employeeId)).toBe(String(myEmployee._id));
+
+    const writeRes = await request(app)
+      .post('/api/availability')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ employeeId: String(myEmployee._id), date: '2026-01-06', startTime: '09:00', endTime: '10:00' });
+    expect(writeRes.status).toBe(403);
   });
 });

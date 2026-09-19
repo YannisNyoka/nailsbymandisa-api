@@ -459,3 +459,45 @@ name/contact/hours, booking deposit, cancellation policy, loyalty/referral rates
 has no frontend page; business info was updated earlier this session by calling the API
 directly. Going forward, either extend `/admin/homepage` into a fuller settings screen or
 keep editing the rest the same way.
+
+### Email (Resend) — booking confirmations & reminders
+Swapped the never-configured SMTP setup (`SMTP_HOST`/`PORT`/`USER`/`PASS`, always
+placeholder values — every transactional email had been silently failing) for
+[Resend](https://resend.com): `config/mailer.js`'s `sendMail()` keeps the exact same
+signature and never-throws behavior, just backed by the Resend SDK now. Free tier is
+3,000 emails/month.
+
+**Setup**, mirroring how Cloudinary was wired up earlier:
+1. Sign up at resend.com, then **API Keys → Create API Key** → put it in `RESEND_API_KEY`.
+2. **Domains → Add Domain** → add the DNS records Resend gives you (on whatever registrar
+   holds `nailsbymandisa.com`). Until this is verified, Resend will only deliver to the
+   email address the Resend account itself was signed up with — real customers won't
+   receive anything, so this step isn't optional for production.
+3. Set `EMAIL_FROM` to an address on that verified domain, e.g.
+   `"NailsByMandisa <bookings@nailsbymandisa.com>"`.
+
+**Two real gaps closed along the way:**
+- `sendBookingConfirmationEmail` (paymentsService.js) only ever emailed **guest**
+  bookings — for a logged-in customer it silently did nothing (the account holder got an
+  in-app bell notification only, never an email). Fixed to resolve the email from the
+  user's account too.
+- Reminders are new: `services/remindersService.js`'s `sendDueReminders()` finds
+  confirmed appointments starting within `SETTINGS.reminderHoursBefore` (default 24h,
+  no admin UI yet — `PATCH /api/settings` directly) that haven't been reminded yet
+  (`appointments.reminderSentAt`, a new field), emails each one once, and atomically
+  claims it first so it's safe to call as often/late as a scheduler likes.
+
+**Why an external cron, not an in-process timer:** Render's free web-service tier spins
+down after inactivity, so a `setInterval`/`node-cron` loop living inside the API process
+wouldn't reliably fire on schedule while asleep. Instead, `.github/workflows/reminders.yml`
+(this repo's GitHub Actions, free) calls `POST /api/cron/reminders` hourly — the call
+itself also wakes the dyno if needed. That route is authenticated by a shared secret
+(`CRON_SECRET`, timing-safe compared, same pattern as the Yoco webhook signature check)
+sent as the `X-Cron-Secret` header — deliberately outside the admin JWT/permission system
+since there's no logged-in person driving it.
+
+**To finish deploying this:** set `RESEND_API_KEY`, `EMAIL_FROM`, and `CRON_SECRET` on
+Render (same value for `CRON_SECRET` as below); then add two repo secrets on GitHub —
+`API_URL` (the deployed API's base URL) and `CRON_SECRET` (must match Render's value) —
+so the scheduled workflow can authenticate. The workflow also has a manual
+`workflow_dispatch` trigger for testing it on demand from the Actions tab.

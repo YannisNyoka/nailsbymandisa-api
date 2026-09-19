@@ -1,6 +1,7 @@
 import { ObjectId } from 'mongodb';
 import { paymentsCollection } from '../models/payments.js';
 import { appointmentsCollection } from '../models/appointments.js';
+import { usersCollection } from '../models/users.js';
 import * as defaultYoco from '../config/yocoClient.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
@@ -209,12 +210,16 @@ export async function initiateBookingDepositPayment({
 }
 
 async function sendBookingConfirmationEmail(appointment) {
-  const to = appointment.guestInfo?.email;
-  if (!to) return; // logged-in users: resolved from their account at send time by the caller
+  const identity = appointment.userId
+    ? await usersCollection().findOne({ _id: appointment.userId })
+    : appointment.guestInfo;
+  const to = identity?.email;
+  if (!to) return;
+  const firstName = appointment.userId ? identity.firstName : identity.name;
   await sendMail({
     to,
     subject: 'Your NailsByMandisa booking is confirmed',
-    html: `<p>Hi ${appointment.guestInfo.name},</p><p>Your booking on ${appointment.date} at ${appointment.startTime} is confirmed. We look forward to seeing you!</p>`,
+    html: `<p>Hi ${firstName},</p><p>Your booking on ${appointment.date} at ${appointment.startTime} is confirmed. We look forward to seeing you!</p>`,
     text: `Your booking on ${appointment.date} at ${appointment.startTime} is confirmed.`,
   });
 }

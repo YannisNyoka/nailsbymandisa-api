@@ -62,6 +62,10 @@ export const settingsJsonSchema = {
       },
       cancellationNoticeHours: { bsonType: 'int', minimum: 0 },
       rescheduleLockoutHours: { bsonType: 'int', minimum: 0 },
+      // How long before a confirmed appointment's start time the reminder email goes out
+      // (see services/remindersService.js). Not in `required` for forward-compat with
+      // documents predating this field; DEFAULT_SETTINGS always sets it.
+      reminderHoursBefore: { bsonType: 'int', minimum: 1 },
       lateArrival: {
         bsonType: 'object',
         required: ['graceMinutes', 'feeCents'],
@@ -150,6 +154,7 @@ export const DEFAULT_SETTINGS = {
   // in the meantime, not a confirmed business decision. Revisit before launch.
   cancellationNoticeHours: 24,
   rescheduleLockoutHours: 12,
+  reminderHoursBefore: 24,
   lateArrival: { graceMinutes: 15, feeCents: 5000 },
   // PLACEHOLDER loyalty policy — reference values from §4.5: 1 point per R1 spent,
   // 100 points = R10 (10c/point), 100-point minimum redemption, capped at 50% of a

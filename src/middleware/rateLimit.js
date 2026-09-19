@@ -21,3 +21,6 @@ export const checkoutLimiter = makeLimiter({ windowMs: 15 * 60 * 1000, max: 20 }
 export const codeValidationLimiter = makeLimiter({ windowMs: 15 * 60 * 1000, max: 30 });
 export const messagingLimiter = makeLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
 export const uploadLimiter = makeLimiter({ windowMs: 15 * 60 * 1000, max: 30 });
+// The reminders workflow calls this at most hourly — a generous ceiling, just to blunt
+// brute-forcing CRON_SECRET rather than to accommodate legitimate retries.
+export const cronLimiter = makeLimiter({ windowMs: 15 * 60 * 1000, max: 20 });

@@ -1,0 +1,29 @@
+name: Send appointment reminders
+
+# Runs hourly and asks the API "is anything due for a reminder right now" (idempotent —
+# see src/services/remindersService.js). Deliberately an external scheduled call rather
+# than an in-process cron in the API itself: Render's free tier spins the web service
+# down when idle, so a timer living inside that process wouldn't reliably fire on
+# schedule. This call also wakes the dyno if it was asleep.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call POST /api/cron/reminders
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" -X POST "${API_URL%/}/api/cron/reminders" \
+            -H "X-Cron-Secret: $CRON_SECRET")
+          echo "HTTP status: $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            echo "Reminders call failed"
+            exit 1
+          fi
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

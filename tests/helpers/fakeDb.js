@@ -169,5 +169,11 @@ export function createFakeDb() {
       if (!collections.has(name)) collections.set(name, makeCollection());
       return collections.get(name);
     },
+    // Mirrors the real driver's Db#command enough for routes/index.js's /health check
+    // (`{ ping: 1 }`) to exercise its real code path in tests instead of always hitting
+    // the catch branch.
+    async command() {
+      return { ok: 1 };
+    },
   };
 }

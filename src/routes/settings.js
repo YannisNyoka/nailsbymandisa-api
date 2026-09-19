@@ -38,6 +38,7 @@ const updateSettingsSchema = z
     offPeakHours: z.array(z.object({ start: z.string(), end: z.string() })),
     cancellationNoticeHours: z.number().int().min(0),
     rescheduleLockoutHours: z.number().int().min(0),
+    reminderHoursBefore: z.number().int().min(1),
     lateArrival: z.object({
       graceMinutes: z.number().int().min(0),
       feeCents: z.number().int().min(0),

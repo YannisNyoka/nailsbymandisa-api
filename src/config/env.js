@@ -42,11 +42,17 @@ const envSchema = z
     YOCO_SECRET_KEY: z.string().min(1, 'Yoco secret key is required (dashboard → Settings → API Keys)'),
     YOCO_WEBHOOK_SECRET: secret(16),
 
-    SMTP_HOST: z.string().min(1),
-    SMTP_PORT: z.coerce.number().int().positive(),
-    SMTP_USER: z.string().min(1),
-    SMTP_PASS: z.string().min(1),
+    // Resend (https://resend.com) — transactional email (booking confirmations,
+    // reminders, gift cards, password resets, admin invites). Free tier: 3,000
+    // emails/month, 100/day. EMAIL_FROM's domain must be verified in the Resend
+    // dashboard before it can send to anyone other than the account owner.
+    RESEND_API_KEY: z.string().min(1, 'Resend API key is required (resend.com → API Keys)'),
     EMAIL_FROM: z.string().min(1),
+
+    // Shared secret the reminders cron workflow presents via the X-Cron-Secret header —
+    // see routes/cron.js. Deliberately separate from the JWT secrets: this authenticates
+    // a scheduled job, not a person, and never expires/rotates on its own.
+    CRON_SECRET: secret(16),
 
     SENTRY_DSN: z.string().url().optional().or(z.literal('')),
 

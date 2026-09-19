@@ -50,6 +50,10 @@ export const appointmentsJsonSchema = {
       createdByAdminId: { bsonType: ['objectId', 'null'] },
       cancelledAt: { bsonType: ['date', 'null'] },
       cancelReason: { bsonType: ['string', 'null'] },
+      // Set once the reminder email has gone out (services/remindersService.js) — the
+      // guard that makes the reminders job idempotent no matter how often it runs. Not in
+      // `required` for forward-compat with documents predating this field.
+      reminderSentAt: { bsonType: ['date', 'null'] },
       createdAt: { bsonType: 'date' },
       updatedAt: { bsonType: 'date' },
     },
@@ -72,6 +76,13 @@ export const appointmentsIndexes = [
   { key: { userId: 1, date: -1 }, name: 'idx_user_date' },
   { key: { employeeId: 1, date: 1 }, name: 'idx_employee_date' },
   { key: { date: 1 }, name: 'idx_date' },
+  // Candidate-set filter for the reminders job (services/remindersService.js) — confirmed,
+  // not yet reminded, ordered by date so the query can range-scan a small upcoming window.
+  {
+    key: { status: 1, reminderSentAt: 1, date: 1 },
+    name: 'idx_reminder_candidates',
+    partialFilterExpression: { status: APPOINTMENT_STATUS.CONFIRMED },
+  },
 ];
 
 export function appointmentsCollection() {

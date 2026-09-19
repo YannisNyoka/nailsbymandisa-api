@@ -90,7 +90,12 @@ export async function initiateBookingDepositPayment({
       giftCardValueCents: 0,
       currency: 'ZAR',
       status: PAYMENT_STATUS.PAID,
-      yocoCheckoutId: null,
+      // yocoCheckoutId deliberately omitted, not set to null — this path pays via
+      // subscription credit and never touches Yoco, so there's never a real value coming.
+      // yocoCheckoutId has a unique+sparse index (models/payments.js); a *sparse* index
+      // still indexes an explicit null (it only skips a genuinely missing field), so
+      // setting it to null here would let only one such payment ever exist before every
+      // later one collided with E11000 — exactly the bug this fixes (see README).
       yocoPaymentId: null,
       redirectUrl: null,
       refunds: [],
@@ -181,7 +186,9 @@ export async function initiateBookingDepositPayment({
     giftCardValueCents,
     currency: 'ZAR',
     status: PAYMENT_STATUS.PENDING,
-    yocoCheckoutId: null,
+    // yocoCheckoutId deliberately omitted here, set via $set once Yoco responds below —
+    // see the PAID branch above for why an explicit null would collide on the unique+
+    // sparse index.
     yocoPaymentId: null,
     redirectUrl: null,
     refunds: [],
@@ -278,7 +285,9 @@ export async function initiateGiftCardPurchase({ amountCents, purchaserUserId, p
     giftCardValueCents: 0,
     currency: 'ZAR',
     status: PAYMENT_STATUS.PENDING,
-    yocoCheckoutId: null,
+    // yocoCheckoutId deliberately omitted here, set via $set once Yoco responds below —
+    // see initiateBookingDepositPayment's PAID branch for why an explicit null would
+    // collide on the unique+sparse index.
     yocoPaymentId: null,
     redirectUrl: null,
     refunds: [],
@@ -335,7 +344,9 @@ export async function initiateSubscriptionPurchase({ userId, planId, yoco = defa
     giftCardValueCents: 0,
     currency: 'ZAR',
     status: PAYMENT_STATUS.PENDING,
-    yocoCheckoutId: null,
+    // yocoCheckoutId deliberately omitted here, set via $set once Yoco responds below —
+    // see initiateBookingDepositPayment's PAID branch for why an explicit null would
+    // collide on the unique+sparse index.
     yocoPaymentId: null,
     redirectUrl: null,
     refunds: [],

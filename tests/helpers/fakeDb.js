@@ -77,9 +77,17 @@ function makeCollection() {
     for (const index of uniqueIndexes) {
       if (index.partialFilterExpression && !matches(candidate, index.partialFilterExpression)) continue;
       const fields = Object.keys(index.key);
+      // Sparse (§ real bug this caught twice — referralCode, then yocoCheckoutId): a
+      // *sparse* index only has an entry for documents where the field is genuinely
+      // present, so a document missing it entirely can never collide with anything.
+      // Critically this is about presence, not value — an explicit `null` still counts
+      // as present and still collides, matching real MongoDB (and matching the actual
+      // production incidents this was written to reproduce).
+      if (index.sparse && fields.some((f) => !(f in candidate))) continue;
       const clashes = docs.some((d) => {
         if (excludeId !== undefined && String(d._id) === String(excludeId)) return false;
         if (index.partialFilterExpression && !matches(d, index.partialFilterExpression)) return false;
+        if (index.sparse && fields.some((f) => !(f in d))) return false;
         return fields.every((f) => String(d[f]) === String(candidate[f]));
       });
       if (clashes) throw new FakeDuplicateKeyError(index.name);

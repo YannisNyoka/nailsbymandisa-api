@@ -11,6 +11,7 @@ import * as subscriptionsService from '../../src/services/subscriptionsService.j
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { giftCardsCollection, giftCardsIndexes } from '../../src/models/giftCards.js';
 import { subscriptionsCollection, subscriptionsIndexes } from '../../src/models/subscriptions.js';
+import { paymentsCollection, paymentsIndexes } from '../../src/models/payments.js';
 import { ROLES, MIN_CHARGE_CENTS } from '../../src/config/constants.js';
 
 const DATE = futureDateString();
@@ -51,6 +52,70 @@ beforeEach(async () => {
   await appointmentsCollection().createIndexes(appointmentsIndexes);
   await giftCardsCollection().createIndexes(giftCardsIndexes);
   await subscriptionsCollection().createIndexes(subscriptionsIndexes);
+});
+
+// Regression for a real production incident: every payment doc used to be inserted with
+// an explicit `yocoCheckoutId: null` before Yoco responded. yocoCheckoutId is unique+
+// sparse, but a *sparse* index still indexes an explicit null (it only skips a genuinely
+// missing field) — so only the very first payment ever created could have a null
+// yocoCheckoutId; every payment after that collided with E11000 and booking/gift-card/
+// subscription checkout broke outright. Scoped to its own beforeEach (rather than the
+// file-wide one above) since most other tests in this file reuse fakeYoco()'s default
+// checkout id across multiple payments within a single test — harmless when nothing
+// enforces uniqueness, but a real collision once it's turned on, and that's a fixture
+// artifact unrelated to what this regression is actually about.
+describe('payments — yocoCheckoutId uniqueness', () => {
+  beforeEach(async () => {
+    await paymentsCollection().createIndexes(paymentsIndexes);
+  });
+
+  it('lets two different pending Yoco checkouts be created back to back without colliding', async () => {
+    const userId1 = new ObjectId();
+    const userId2 = new ObjectId();
+    const appointment1 = await bookAppointment({ userId: userId1, startTime: '10:00' });
+    const appointment2 = await bookAppointment({ userId: userId2, startTime: '13:00' });
+
+    const first = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment1._id,
+      actor: { _id: userId1, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_a' }),
+    });
+    const second = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment2._id,
+      actor: { _id: userId2, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_b' }),
+    });
+
+    expect(first.yocoCheckoutId).toBe('checkout_a');
+    expect(second.yocoCheckoutId).toBe('checkout_b');
+  });
+
+  it('lets a subscription-credit-paid booking (never assigned a yocoCheckoutId) coexist with a real Yoco payment', async () => {
+    const userId = new ObjectId();
+    const plan = await subscriptionPlansService.createPlan({
+      name: 'Unlimited', priceCents: 50000, creditsPerPeriod: 2, periodDays: 30,
+    });
+    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
+    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_regression' });
+
+    const creditAppointment = await bookAppointment({ userId, startTime: '09:00' });
+    const creditPayment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: creditAppointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      useSubscriptionCredit: true,
+      yoco: fakeYoco(),
+    });
+    expect(creditPayment.yocoCheckoutId).toBeUndefined();
+
+    const otherUserId = new ObjectId();
+    const yocoAppointment = await bookAppointment({ userId: otherUserId, startTime: '11:00' });
+    const yocoPayment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: yocoAppointment._id,
+      actor: { _id: otherUserId, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_after_credit' }),
+    });
+    expect(yocoPayment.yocoCheckoutId).toBe('checkout_after_credit');
+  });
 });
 
 describe('paymentsService.initiateBookingDepositPayment', () => {

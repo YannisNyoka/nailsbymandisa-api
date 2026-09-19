@@ -100,15 +100,22 @@ export const settingsJsonSchema = {
           welcomeDiscountPercent: { bsonType: 'int', minimum: 0, maximum: 100 },
         },
       },
-      // Admin-editable home page hero background (§4.1 gap-fix — previously hardcoded in
-      // HomePage.css). Not in `required` so it stays optional for forward-compat, but
-      // DEFAULT_SETTINGS always sets it so a fresh install still has a real hero image.
-      heroMedia: {
-        bsonType: 'object',
-        required: ['url', 'type'],
-        properties: {
-          url: { bsonType: 'string' },
-          type: { enum: ['image', 'video'] },
+      // Admin-editable home page hero (§4.1 gap-fix — previously hardcoded in
+      // HomePage.css). A sequence rather than a single item — the hero plays through
+      // them in order, looping back to the first (§gap-fix: admin needed to upload more
+      // than one video for a real slideshow, not just swap a single background). Not in
+      // `required` so it stays optional for forward-compat, but DEFAULT_SETTINGS always
+      // sets it so a fresh install still has a real hero.
+      heroMediaItems: {
+        bsonType: 'array',
+        minItems: 1,
+        items: {
+          bsonType: 'object',
+          required: ['url', 'type'],
+          properties: {
+            url: { bsonType: 'string' },
+            type: { enum: ['image', 'video'] },
+          },
         },
       },
       updatedAt: { bsonType: 'date' },
@@ -176,11 +183,14 @@ export const DEFAULT_SETTINGS = {
     welcomeDiscountPercent: 10, // PLACEHOLDER — friend's first-booking discount
   },
   // Real photo (not a placeholder) — see README "Home page hero" for where it came from.
-  // Admin-editable at /admin/homepage.
-  heroMedia: {
-    url: 'https://res.cloudinary.com/akrzser7/image/upload/f_auto,q_auto,c_fill,g_auto,w_1920,h_1200/v1789408147/nailsbymandisa/gallery/ldge1cwpb9zji2j0tvlm.jpg',
-    type: 'image',
-  },
+  // Admin-editable at /admin/homepage; the admin can add more items to make it a
+  // slideshow (played in this array order, looping back to the start).
+  heroMediaItems: [
+    {
+      url: 'https://res.cloudinary.com/akrzser7/image/upload/f_auto,q_auto,c_fill,g_auto,w_1920,h_1200/v1789408147/nailsbymandisa/gallery/ldge1cwpb9zji2j0tvlm.jpg',
+      type: 'image',
+    },
+  ],
   updatedAt: new Date(),
 };
 

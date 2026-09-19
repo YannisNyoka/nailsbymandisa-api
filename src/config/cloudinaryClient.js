@@ -17,16 +17,34 @@ if (isConfigured) {
   });
 }
 
-export async function uploadImage(buffer, { folder }) {
+function assertConfigured() {
   if (!isConfigured) {
     throw new AppError(
-      'Image uploads are not configured yet — ask an admin to set CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET.',
+      'Uploads are not configured yet — ask an admin to set CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET.',
       503,
       'UPLOADS_NOT_CONFIGURED'
     );
   }
+}
+
+export async function uploadImage(buffer, { folder }) {
+  assertConfigured();
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream({ folder, resource_type: 'image' }, (err, result) => {
+      if (err) return reject(err);
+      resolve(result);
+    });
+    stream.end(buffer);
+  });
+}
+
+// Same shape as uploadImage, `resource_type: 'video'` — used for the admin-uploaded
+// home page hero video (see routes/uploads.js's size/mimetype limits, set much higher
+// here than for images).
+export async function uploadVideo(buffer, { folder }) {
+  assertConfigured();
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream({ folder, resource_type: 'video' }, (err, result) => {
       if (err) return reject(err);
       resolve(result);
     });

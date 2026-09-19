@@ -41,21 +41,26 @@ describe('settings', () => {
     expect(res.body.settings.bookingDepositCents).toBe(20000);
   });
 
-  it('lets an admin update the home page hero media without touching other fields', async () => {
+  it('lets an admin update the home page hero slideshow without touching other fields', async () => {
     const { accessToken } = await createUserAndToken({
       role: ROLES.ADMIN,
       permissions: [PERMISSIONS.MANAGE_SETTINGS],
     });
+    const items = [
+      { url: 'https://example.com/hero-1.mp4', type: 'video' },
+      { url: 'https://example.com/hero-2.mp4', type: 'video' },
+      { url: 'https://example.com/hero-3.mp4', type: 'video' },
+    ];
     const res = await request(app)
       .patch('/api/settings')
       .set('Authorization', `Bearer ${accessToken}`)
-      .send({ heroMedia: { url: 'https://example.com/hero.mp4', type: 'video' } });
+      .send({ heroMediaItems: items });
     expect(res.status).toBe(200);
-    expect(res.body.settings.heroMedia).toEqual({ url: 'https://example.com/hero.mp4', type: 'video' });
+    expect(res.body.settings.heroMediaItems).toEqual(items);
     expect(res.body.settings.businessName).toBe('NailsByMandisa');
   });
 
-  it('rejects an invalid heroMedia type', async () => {
+  it('rejects an invalid heroMediaItems entry type', async () => {
     const { accessToken } = await createUserAndToken({
       role: ROLES.ADMIN,
       permissions: [PERMISSIONS.MANAGE_SETTINGS],
@@ -63,7 +68,19 @@ describe('settings', () => {
     const res = await request(app)
       .patch('/api/settings')
       .set('Authorization', `Bearer ${accessToken}`)
-      .send({ heroMedia: { url: 'https://example.com/hero.gif', type: 'gif' } });
+      .send({ heroMediaItems: [{ url: 'https://example.com/hero.gif', type: 'gif' }] });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an empty heroMediaItems array', async () => {
+    const { accessToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_SETTINGS],
+    });
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ heroMediaItems: [] });
     expect(res.status).toBe(400);
   });
 });

@@ -54,10 +54,14 @@ const updateSettingsSchema = z
       referrerBonusPoints: z.number().int().min(0),
       welcomeDiscountPercent: z.number().int().min(0).max(100),
     }),
-    heroMedia: z.object({
-      url: z.string().url(),
-      type: z.enum(['image', 'video']),
-    }),
+    heroMediaItems: z
+      .array(
+        z.object({
+          url: z.string().url(),
+          type: z.enum(['image', 'video']),
+        })
+      )
+      .min(1),
   })
   .partial();
 

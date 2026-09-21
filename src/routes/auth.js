@@ -13,18 +13,33 @@ const REFRESH_COOKIE = 'refreshToken';
 const REFRESH_COOKIE_PATH = '/api/auth';
 const REFRESH_TTL_MS = parseDurationMs(env.JWT_REFRESH_TTL);
 
+// Exported so it's independently testable without simulating a full production env
+// bootstrap (env.js requires SENTRY_DSN etc. once NODE_ENV=production). The frontend
+// (Vercel) and this API (Render) are on different domains in production, so every
+// refresh call is a genuine cross-site fetch — a SameSite=Lax cookie is only sent on
+// top-level navigations, never on a background fetch/XHR, so it silently never reached
+// the API here and every reload looked like a logout. 'none' requires secure:true
+// (browsers reject it otherwise), which isProdFlag already guarantees when true. Local
+// dev keeps 'lax': localhost:5173 and localhost:4000 count as the same site (SameSite
+// ignores port), so Lax already works there without this.
+export function refreshCookieAttributes(isProdFlag) {
+  return { secure: isProdFlag, sameSite: isProdFlag ? 'none' : 'lax' };
+}
+
 function setRefreshCookie(res, token) {
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
-    secure: isProd,
-    sameSite: 'lax',
+    ...refreshCookieAttributes(isProd),
     path: REFRESH_COOKIE_PATH,
     maxAge: REFRESH_TTL_MS,
   });
 }
 
 function clearRefreshCookie(res) {
-  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
+  // Must match the attributes the cookie was actually set with (secure/sameSite
+  // included) — a browser can otherwise fail to recognize this as the same cookie and
+  // leave the real one (particularly a SameSite=None one) behind after logout.
+  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH, ...refreshCookieAttributes(isProd) });
 }
 
 const passwordSchema = z.string().min(10, 'Password must be at least 10 characters.');

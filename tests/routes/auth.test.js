@@ -2,6 +2,7 @@ import request from 'supertest';
 import { createApp } from '../../src/app.js';
 import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
+import { refreshCookieAttributes } from '../../src/routes/auth.js';
 
 const app = createApp();
 
@@ -21,6 +22,16 @@ beforeEach(() => {
   setTestDb(createFakeDb());
 });
 
+describe('refreshCookieAttributes', () => {
+  it('uses SameSite=None + Secure in production (Vercel frontend, Render API — genuinely cross-site)', () => {
+    expect(refreshCookieAttributes(true)).toEqual({ secure: true, sameSite: 'none' });
+  });
+
+  it('uses SameSite=Lax + not-Secure outside production (localhost ports are same-site)', () => {
+    expect(refreshCookieAttributes(false)).toEqual({ secure: false, sameSite: 'lax' });
+  });
+});
+
 describe('POST /api/auth/register', () => {
   it('creates an account and sets an httpOnly refresh cookie', async () => {
     const res = await request(app).post('/api/auth/register').send(credentials);
@@ -31,6 +42,10 @@ describe('POST /api/auth/register', () => {
     const cookie = res.headers['set-cookie']?.find((c) => c.startsWith('refreshToken='));
     expect(cookie).toBeDefined();
     expect(cookie).toMatch(/HttpOnly/i);
+    // Outside production, localhost:5173 <-> localhost:4000 count as the same site
+    // (SameSite ignores port), so Lax + no Secure is correct here.
+    expect(cookie).toMatch(/SameSite=Lax/i);
+    expect(cookie).not.toMatch(/Secure/i);
   });
 
   it('rejects a short password with 400', async () => {

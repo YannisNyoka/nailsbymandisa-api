@@ -150,8 +150,9 @@ export const DEFAULT_SETTINGS = {
     tiktok: 'https://www.tiktok.com/@mandisa_dlangamandla',
     twitter: 'https://x.com/NailsByMandisa',
   },
+  // Real hours (confirmed by the owner) — open Sunday–Friday, closed Saturday.
   hours: Object.fromEntries(
-    WEEKDAYS.map((d) => [d, d === 'sun' ? { closed: true, open: null, close: null } : { closed: false, open: '09:00', close: '17:00' }])
+    WEEKDAYS.map((d) => [d, d === 'sat' ? { closed: true, open: null, close: null } : { closed: false, open: '09:00', close: '17:00' }])
   ),
   bookingDepositCents: 15000, // PLACEHOLDER — R150
   offPeakSurchargeCents: 5000, // PLACEHOLDER — R50

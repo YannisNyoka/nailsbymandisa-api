@@ -3,7 +3,7 @@ import { z } from 'zod';
 import * as authService from '../services/authService.js';
 import { validate } from '../middleware/validate.js';
 import { authenticate } from '../middleware/auth.js';
-import { authLimiter, passwordResetLimiter } from '../middleware/rateLimit.js';
+import { authLimiter, refreshLimiter, passwordResetLimiter } from '../middleware/rateLimit.js';
 import { isProd, env } from '../config/env.js';
 import { parseDurationMs } from '../utils/duration.js';
 
@@ -63,7 +63,7 @@ router.post('/login', authLimiter, validate(loginSchema), async (req, res, next)
   }
 });
 
-router.post('/refresh', authLimiter, async (req, res, next) => {
+router.post('/refresh', refreshLimiter, async (req, res, next) => {
   try {
     const rawRefreshToken = req.cookies?.[REFRESH_COOKIE];
     const { user, accessToken, refreshToken } = await authService.refresh({ rawRefreshToken });

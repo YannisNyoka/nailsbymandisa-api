@@ -13,11 +13,11 @@ import { router as loyaltyRouter } from './loyalty.js';
 import { router as referralsRouter } from './referrals.js';
 import { router as discountCodesRouter } from './discountCodes.js';
 import { router as giftCardsRouter } from './giftCards.js';
-import { router as subscriptionsRouter } from './subscriptions.js';
 import { router as galleryRouter } from './gallery.js';
 import { router as clientGalleryRouter } from './clientGallery.js';
 import { router as uploadsRouter } from './uploads.js';
 import { router as cronRouter } from './cron.js';
+import { router as contactRouter } from './contact.js';
 
 export const router = Router();
 
@@ -52,8 +52,8 @@ router.use('/loyalty', loyaltyRouter);
 router.use('/referrals', referralsRouter);
 router.use('/discount-codes', discountCodesRouter);
 router.use('/gift-cards', giftCardsRouter);
-router.use('/subscriptions', subscriptionsRouter);
 router.use('/gallery', galleryRouter);
 router.use('/client-gallery', clientGalleryRouter);
 router.use('/uploads', uploadsRouter);
 router.use('/cron', cronRouter);
+router.use('/contact', contactRouter);

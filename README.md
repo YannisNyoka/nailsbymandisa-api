@@ -1,8 +1,8 @@
 # nailsbymandisa
 
 Booking &amp; loyalty platform for nailsbymandisa nail salon. No e-commerce/shop — this app
-covers appointments, payments for those appointments, and the loyalty/referral/gift-card/
-subscription mechanics around them.
+covers appointments, payments for those appointments, and the loyalty/referral/gift-card
+mechanics around them.
 
 ## Structure
 
@@ -74,14 +74,9 @@ See the project brief for the full build order. Status:
       floor, full admin visibility. This is exactly the feature the brief called out as
       half-built in the reference app (no purchase flow, non-atomic redemption) — built
       completely this time, including the concurrent-redemption test that proves it.
-- [x] Step 10 (subscriptions) — plans grant N booking credits per period; a credit fully
-      covers a deposit and bypasses Yoco entirely (confirmed synchronously, no webhook
-      wait); one subscription document per customer (upsert on resubscribe/renew, not a
-      second row); plan deletion blocked while active subscribers exist rather than
-      silently orphaning them. No automatic recurring billing — Yoco's Checkout API is
-      one-off sessions, not a stored-card/recurring primitive, so renewal is a
-      customer-triggered repeat of the same subscribe call, documented as a real
-      limitation rather than papered over.
+- [x] Step 10 (subscriptions) — built (plans, per-customer credits, credit-covers-deposit
+      checkout bypass), then **fully removed** later at the owner's request — see
+      "Subscriptions removed" below for what that took.
 - [x] Step 11 — client gallery (admin-curated + customer-submitted before/afters with a
       moderation queue, public likes), admin broadcast/targeted notification compose
       (real form, not `prompt()`), optional SMS via Twilio, WhatsApp deep link, custom
@@ -99,9 +94,9 @@ See the project brief for the full build order. Status:
       - Missing rate limiting on `/auth/change-password` (§5.5) — now behind `authLimiter`.
       - A malformed `:id` route param threw an unhandled `BSONError` → generic 500 instead
         of a clean 400 (§5.6/§5.11) — normalized centrally in `errorHandler.js`.
-      - No pagination on 5 admin list endpoints (discount codes, gift cards, subscriptions,
-        gallery, gallery moderation queue) (§7.3) — added a shared `paginate()` utility and
-        wired `Pagination` into each admin page.
+      - No pagination on 5 admin list endpoints (discount codes, gift cards, subscriptions
+        — since removed, see below —, gallery, gallery moderation queue) (§7.3) — added a
+        shared `paginate()` utility and wired `Pagination` into each admin page.
       - The refund flow (`AdminPaymentsPage`) let "Issue refund" fire immediately from the
         amount/reason form, unlike every other money-affecting/destructive admin action,
         which goes through `ConfirmDialog` with a plain-language summary first (§7.2) —
@@ -140,15 +135,15 @@ flex/grid with `auto-fit`/`auto-fill`/`minmax()` and no fixed pixel widths):
   it, matching the account-menu dropdown pattern already used in `Layout.jsx`) that shows
   the current section's label and closes automatically on navigation.
 
-`api/` has 182 passing tests (Jest + Supertest) covering auth rotation/reuse-detection,
+`api/` has 214+ passing tests (Jest + Supertest) covering auth rotation/reuse-detection,
 permission gates, the booking engine (overlap rejection, the atomic double-booking guard,
 blocked-slot enforcement, cancellation/reschedule windows, off-peak pricing), payments
 (webhook signature verification, idempotent replay handling, atomic refund floor checks
-under concurrency), admin overview/client-detail correctness, loyalty/discount/gift-card/
-subscription-credit atomic guarantees (concurrent redemptions can't overdraw a balance,
-over-redeem a limited code, overdraw a gift card, or double-spend a credit), gallery
-moderation visibility rules, and admin-user-management (below). `web/` has design-system
-component tests plus LoginPage and BookingWizard (guest flow) integration tests.
+under concurrency), admin overview/client-detail correctness, loyalty/discount/gift-card
+atomic guarantees (concurrent redemptions can't overdraw a balance, over-redeem a limited
+code, or overdraw a gift card), gallery moderation visibility rules, and
+admin-user-management (below). `web/` has design-system component tests plus LoginPage
+and BookingWizard (guest flow) integration tests.
 
 ### Admin user management (`/admin/users`)
 Closes a gap flagged after Step 12: previously the only way to grant someone admin access
@@ -196,10 +191,42 @@ now exists to build one on, but the screen itself isn't built).
   calls across services got a same-millisecond tiebreaker while in there — genuine
   precision gaps, not flaky tests, surfaced by the new loyalty ledger ordering test.
 
-**Known gap: abandoned pending-payment appointments never expire.** A booking holds its
-slot (via the unique index) as soon as it's created, even if the customer never completes
-payment — there's no TTL/cleanup job releasing it. Worth a small scheduled job before
-launch; flagged rather than silently left implicit.
+**Fixed: only a paid appointment holds a slot — a pending/unpaid one never blocks it, not
+even briefly.** A booking used to hold its slot (via the unique index) indefinitely from
+the moment it was created, even if the customer never completed payment — an abandoned
+checkout blocked that slot for everyone else forever. A first pass added a 15-minute
+grace hold before an unpaid booking stopped blocking; on request, that was replaced with
+a stricter guarantee — a `pending_payment` appointment never blocks the slot at all,
+immediately, not just after some delay:
+- The unique slot index (`models/appointments.js`'s `uniq_active_slot`) is partial on
+  `status: 'confirmed'` only — `pending_payment` isn't part of the constraint at the
+  database level, so two different customers can each hold a pending appointment for the
+  exact same slot at once. `bookingService.js`'s `evaluateSlot()` (the slot picker,
+  booking, reschedule) matches this: only `SLOT_BLOCKING_STATUSES = [CONFIRMED]` counts as
+  occupying a slot.
+- Whoever's payment is confirmed *first* wins the slot
+  (`paymentsService.confirmAppointmentForPaidDeposit`). Before sending a customer to Yoco,
+  `initiateBookingDepositPayment` re-checks the slot is still actually free — if someone
+  else has since been confirmed for it, that customer is rejected (and their now-unviable
+  appointment cancelled) before they ever pay, not after.
+- The residual race — two payments confirm close enough together that the loser's Yoco
+  webhook arrives after the winner already holds the slot — is still caught: the DB's
+  unique index rejects the loser's write with a duplicate-key error,
+  `confirmAppointmentForPaidDeposit` catches it, cancels that appointment, and logs a
+  `payment_needs_review` activity entry rather than silently dropping a paid-but-
+  unconfirmed booking or crashing the webhook — real money was captured, so it's surfaced
+  for a human to refund rather than resolved automatically.
+- An abandoned, never-paid `pending_payment` appointment still gets an `autoExpireAt`
+  (`UNPAID_APPOINTMENT_EXPIRY_MINUTES` = 15, `config/constants.js`), but purely for
+  hygiene now, not slot-blocking correctness — `POST /api/cron/expire-unpaid-appointments`
+  (`.github/workflows/expire-unpaid-appointments.yml`, every 5 minutes) formally cancels
+  and notifies the customer, so "my bookings"/admin views don't show a dead appointment as
+  if still awaiting payment.
+- Changing `uniq_active_slot`'s definition on an already-deployed database needed a real
+  migration path: `models/validation.js`'s `ensureCollection()` now syncs indexes rather
+  than just calling `createIndexes()` blindly — a same-named index whose live definition
+  no longer matches gets dropped and recreated automatically at boot, so this (and any
+  future index-shape change) doesn't need a manual one-off script run against production.
 
 **Browser end-to-end testing still not done.** Lint, unit/integration tests (which exercise
 the real Express app + real service logic against an in-memory fake Mongo), and production
@@ -222,24 +249,31 @@ possible — worth doing before trusting the UI beyond what the automated tests 
   to change the bounds without a deploy.
 - At booking checkout, reductions apply in a fixed order — discount code, then loyalty
   points, then gift card balance — each computed against what's left after the previous
-  one, all floored at `MIN_CHARGE_CENTS` so Yoco always receives a positive amount. A
-  subscription credit, when used, replaces this whole reduction chain (it covers the
-  deposit outright — see subscription notes below).
+  one, all floored at `MIN_CHARGE_CENTS` so Yoco always receives a positive amount.
 - There's deliberately no "check this gift card's balance" endpoint — it would let anyone
   probe codes for a live balance. A card's state is only visible to its purchaser or an
   admin, both authenticated.
 
-### Subscription notes
-- A plan's credits reset to a fresh `creditsPerPeriod` on every successful payment
-  (first subscribe or renewal) rather than accumulating — unused credits don't roll
-  over. This is a deliberate simplicity choice, not an oversight; revisit if the salon
-  wants rollover.
-- A customer can hold exactly one subscription document (enforced by a unique index on
-  `userId`, not just application logic) — switching plans requires cancelling first;
-  renewing the same plan reuses the document rather than creating a new one.
-- Booking with a credit produces a `payment` record with `amountCents: 0` and
-  `status: 'paid'` immediately (no `yocoCheckoutId`) — the frontend checks the response
-  status and skips the Yoco redirect entirely for that path.
+### Subscriptions removed
+Built in Step 10 (plans grant N booking credits per period; a credit fully covers a
+deposit and bypasses Yoco entirely; one subscription document per customer), then
+removed entirely at the owner's request — production had zero real subscribers or
+subscription-purpose payments at removal time, so this was a clean deletion, not a
+data migration:
+- Deleted outright: `models/subscriptionPlans.js`, `models/subscriptions.js`,
+  `routes/subscriptions.js`, `services/subscriptionPlansService.js`,
+  `services/subscriptionsService.js`, their tests, and the (now-empty)
+  `subscriptionPlans`/`subscriptions` MongoDB collections.
+- `payments.subscriptionId` removed from the schema/`required` list — no historical data
+  depended on it. `PAYMENT_PURPOSE.SUBSCRIPTION` and the `manage_subscriptions` permission
+  removed from `config/constants.js`; the one admin account that held that permission had
+  it stripped from its `permissions` array directly in the database.
+- `paymentsService.initiateBookingDepositPayment`'s subscription-credit branch (and
+  `useSubscriptionCredit` throughout the request chain — route → service → frontend) is
+  gone; every deposit now always goes through the normal Yoco checkout.
+- Frontend: `/subscriptions/plans`, `/account/subscription`, `/admin/subscription-plans`,
+  `/admin/subscribers` routes and their pages deleted; "Membership" (header nav) and
+  "Subscription" (account tab) links removed.
 
 ### Gallery, notifications, PWA, SEO notes
 - **No file-upload storage.** Both `gallery` (admin-curated) and `clientGallery` (UGC)
@@ -419,17 +453,15 @@ scrim for contrast. This went through two iterations:
   mode — vw units include the scrollbar gutter on some browsers, which can otherwise force
   a stray pixel of horizontal scroll; verified overflow-free at 390/1440/1920px regardless.
 
-**Admin-editable, image or video** — `/admin/homepage` (new `AdminHomepagePage.jsx`,
-new sidebar item). Backend: `SETTINGS.heroMedia: { url, type }` (`api/src/models/settings.js`,
-`routes/settings.js`), updated via the existing `PATCH /api/settings` (`MANAGE_SETTINGS`
-permission) — `$set` semantics mean patching just `heroMedia` doesn't touch any other
-settings field. Images go through the same real Cloudinary upload
-(`uploadImageFile`) the gallery uses; video is URL-paste (autoplays muted+looped, so kept
-short is on the admin to manage — no video transcoding/hosting was in scope). The public
-`HomePage.jsx` fetches `GET /api/settings` (public, no auth) and renders either an `<img>`
-or an autoplaying muted `<video>` behind the overlay depending on `heroMedia.type`, falling
-back to the same default photo (hardcoded client-side, matching `DEFAULT_SETTINGS`) until
-the real value loads, so there's no flash of an empty hero.
+**Admin-editable, a slideshow of image/video items** — `/admin/homepage`
+(`AdminHomepagePage.jsx`). Backend: `SETTINGS.heroMediaItems: [{ url, type }]`
+(`api/src/models/settings.js`, `routes/settings.js`), updated via the existing
+`PATCH /api/settings` (`MANAGE_SETTINGS` permission). Both images and videos go through
+real file upload (`POST /api/uploads/image` / `/uploads/video`, both backed by Cloudinary)
+— no more URL-pasting for either. The public `HomePage.jsx` fetches `GET /api/settings`
+(public, no auth) and plays the items in array order, advancing to the next when a video
+ends or after a fixed delay for an image, looping back to the first — falling back to a
+single default photo (hardcoded client-side) until the real value loads.
 
 This is the first real instance of the "no admin settings screen exists" gap (noted
 earlier in this file) actually being closed — narrowly, for just this one setting, not a
@@ -453,7 +485,7 @@ itself entirely when there's no published gallery content yet, same as "Our serv
 already did for an empty services list.
 
 **Still no *general* admin settings screen.** `/api/settings` has a working GET/PATCH API
-(built in Step 3) and now exactly one field of it (`heroMedia`) has a real admin UI
+(built in Step 3) and now exactly one field of it (`heroMediaItems`) has a real admin UI
 (`/admin/homepage`, above). Everything else on the settings document — business
 name/contact/hours, booking deposit, cancellation policy, loyalty/referral rates — still
 has no frontend page; business info was updated earlier this session by calling the API
@@ -494,7 +526,10 @@ wouldn't reliably fire on schedule while asleep. Instead, `.github/workflows/rem
 itself also wakes the dyno if needed. That route is authenticated by a shared secret
 (`CRON_SECRET`, timing-safe compared, same pattern as the Yoco webhook signature check)
 sent as the `X-Cron-Secret` header — deliberately outside the admin JWT/permission system
-since there's no logged-in person driving it.
+since there's no logged-in person driving it. The same pattern powers a second, more
+frequent job — `.github/workflows/expire-unpaid-appointments.yml` calls
+`POST /api/cron/expire-unpaid-appointments` every 5 minutes (see "only a paid appointment
+holds a slot" above).
 
 **To finish deploying this:** set `RESEND_API_KEY`, `EMAIL_FROM`, and `CRON_SECRET` on
 Render (same value for `CRON_SECRET` as below); then add two repo secrets on GitHub —

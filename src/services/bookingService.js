@@ -6,7 +6,12 @@ import { employeesCollection } from '../models/employees.js';
 import { getSettings } from './settingsService.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
-import { APPOINTMENT_STATUS, ANY_AVAILABLE_EMPLOYEE, SLOT_GRANULARITY_MINUTES } from '../config/constants.js';
+import {
+  APPOINTMENT_STATUS,
+  ANY_AVAILABLE_EMPLOYEE,
+  SLOT_GRANULARITY_MINUTES,
+  UNPAID_APPOINTMENT_EXPIRY_MINUTES,
+} from '../config/constants.js';
 import {
   weekdayKeyForDate,
   toInstant,
@@ -17,7 +22,18 @@ import {
 } from '../utils/businessTime.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../utils/AppError.js';
 
-const ACTIVE_STATUSES = [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED];
+// "Live" (not yet cancelled/completed/no-show) — used only to gate whether an
+// appointment can still be rescheduled/cancelled at all. Deliberately NOT used for slot
+// conflicts: a pending_payment appointment is still "live" in that sense, but must never
+// block anyone else's slot — see SLOT_BLOCKING_STATUSES below.
+const LIVE_STATUSES = [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED];
+
+// Only a paid (confirmed) appointment holds its slot — a pending/unpaid one never blocks
+// anyone else from booking or paying for the same slot, not even briefly. Two customers
+// can both hold a pending appointment for the same slot at once; whoever's payment
+// confirms first wins it (paymentsService.js's confirmAppointmentForPaidDeposit), and the
+// other is caught and cancelled at their own checkout attempt (initiateBookingDepositPayment).
+const SLOT_BLOCKING_STATUSES = [APPOINTMENT_STATUS.CONFIRMED];
 
 // ============================================================================
 // THE single shared slot-validation rule (§4.3). Every path that can create or move a
@@ -52,7 +68,7 @@ function evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appoin
 
   const conflictingAppointment = appointmentsForDay.find(
     (a) =>
-      ACTIVE_STATUSES.includes(a.status) &&
+      SLOT_BLOCKING_STATUSES.includes(a.status) &&
       String(a._id) !== String(excludeAppointmentId) &&
       timeRangesOverlap(startTime, endTime, a.startTime, a.endTime)
   );
@@ -72,6 +88,55 @@ export async function checkSlotBookable({ employeeId, date, startTime, endTime, 
     (await appointmentsCollection().find({ employeeId: new ObjectId(employeeId), date })).toArray(),
   ]);
   return evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId });
+}
+
+// Shared cancel-and-notify for a pending_payment appointment that's no longer going
+// anywhere — either nobody ever paid for it (expireDueUnpaidAppointments) or someone
+// else was confirmed for the same slot first (paymentsService.js's
+// initiateBookingDepositPayment). Runs the same notify/log side effects a normal
+// cancellation gets, so the customer isn't left wondering why their booking vanished.
+export async function cancelUnviableAppointment(appointment, reason) {
+  const result = await appointmentsCollection().findOneAndUpdate(
+    { _id: appointment._id, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
+    { $set: { status: APPOINTMENT_STATUS.CANCELLED, cancelledAt: new Date(), cancelReason: reason, updatedAt: new Date() } }
+  );
+  if (!result) return; // already handled concurrently — nothing more to do
+
+  await logActivity({
+    type: 'booking_auto_cancelled',
+    message: `Booking on ${appointment.date} at ${appointment.startTime} auto-cancelled: ${reason}`,
+    actorUserId: appointment.userId,
+    metadata: { appointmentId: String(appointment._id) },
+  });
+
+  if (appointment.userId) {
+    await createClientNotification({
+      userId: appointment.userId,
+      type: 'booking_cancelled',
+      title: 'Booking cancelled',
+      body: `Your booking for ${appointment.date} at ${appointment.startTime} was cancelled: ${reason}`,
+      link: '/book',
+    });
+  }
+}
+
+// Cron-driven hygiene pass (routes/cron.js). Purely cosmetic/organizational, never load
+// bearing for double-booking correctness — a pending_payment appointment never blocked
+// anyone else's slot in the first place (SLOT_BLOCKING_STATUSES above), so this doesn't
+// "free" anything. It just keeps "my bookings"/admin views from showing an abandoned,
+// never-paid appointment as if it were still awaiting payment indefinitely.
+export async function expireDueUnpaidAppointments() {
+  const stale = await (
+    await appointmentsCollection().find({
+      status: APPOINTMENT_STATUS.PENDING_PAYMENT,
+      autoExpireAt: { $lt: new Date() },
+    })
+  ).toArray();
+  for (const appointment of stale) {
+    // eslint-disable-next-line no-await-in-loop -- a periodic sweep, not a hot request path
+    await cancelUnviableAppointment(appointment, `Payment was not completed within ${UNPAID_APPOINTMENT_EXPIRY_MINUTES} minutes.`);
+  }
+  return { expiredCount: stale.length };
 }
 
 async function loadActiveServices(serviceIds) {
@@ -162,6 +227,7 @@ export async function createAppointment({ userId, guestInfo, employeeId, service
     depositCents: quote.depositCents,
     isOffPeak: quote.isOffPeak,
     status: APPOINTMENT_STATUS.PENDING_PAYMENT,
+    autoExpireAt: new Date(now.getTime() + UNPAID_APPOINTMENT_EXPIRY_MINUTES * 60_000),
     paymentId: null,
     notes: notes ?? null,
     createdByAdminId: createdByAdminId ? new ObjectId(createdByAdminId) : null,
@@ -211,7 +277,7 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, ac
   const appointment = await getAppointment(appointmentId);
   assertOwnerOrAdmin(appointment, actor);
 
-  if (!ACTIVE_STATUSES.includes(appointment.status)) {
+  if (!LIVE_STATUSES.includes(appointment.status)) {
     throw badRequest('Only pending or confirmed appointments can be rescheduled.');
   }
 
@@ -264,7 +330,7 @@ export async function cancelAppointment({ appointmentId, actor, reason }) {
   const appointment = await getAppointment(appointmentId);
   assertOwnerOrAdmin(appointment, actor);
 
-  if (!ACTIVE_STATUSES.includes(appointment.status)) {
+  if (!LIVE_STATUSES.includes(appointment.status)) {
     throw badRequest('This appointment has already been cancelled or completed.');
   }
 

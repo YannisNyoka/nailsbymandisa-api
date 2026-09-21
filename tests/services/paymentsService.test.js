@@ -6,12 +6,10 @@ import * as bookingService from '../../src/services/bookingService.js';
 import * as paymentsService from '../../src/services/paymentsService.js';
 import * as loyaltyService from '../../src/services/loyaltyService.js';
 import * as discountsService from '../../src/services/discountsService.js';
-import * as subscriptionPlansService from '../../src/services/subscriptionPlansService.js';
-import * as subscriptionsService from '../../src/services/subscriptionsService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { giftCardsCollection, giftCardsIndexes } from '../../src/models/giftCards.js';
-import { subscriptionsCollection, subscriptionsIndexes } from '../../src/models/subscriptions.js';
 import { paymentsCollection, paymentsIndexes } from '../../src/models/payments.js';
+import { activityLogCollection } from '../../src/models/activityLog.js';
 import { ROLES, MIN_CHARGE_CENTS } from '../../src/config/constants.js';
 
 const DATE = futureDateString();
@@ -51,19 +49,18 @@ beforeEach(async () => {
   setTestDb(createFakeDb());
   await appointmentsCollection().createIndexes(appointmentsIndexes);
   await giftCardsCollection().createIndexes(giftCardsIndexes);
-  await subscriptionsCollection().createIndexes(subscriptionsIndexes);
 });
 
 // Regression for a real production incident: every payment doc used to be inserted with
 // an explicit `yocoCheckoutId: null` before Yoco responded. yocoCheckoutId is unique+
 // sparse, but a *sparse* index still indexes an explicit null (it only skips a genuinely
 // missing field) — so only the very first payment ever created could have a null
-// yocoCheckoutId; every payment after that collided with E11000 and booking/gift-card/
-// subscription checkout broke outright. Scoped to its own beforeEach (rather than the
-// file-wide one above) since most other tests in this file reuse fakeYoco()'s default
-// checkout id across multiple payments within a single test — harmless when nothing
-// enforces uniqueness, but a real collision once it's turned on, and that's a fixture
-// artifact unrelated to what this regression is actually about.
+// yocoCheckoutId; every payment after that collided with E11000 and booking/gift-card
+// checkout broke outright. Scoped to its own beforeEach (rather than the file-wide one
+// above) since most other tests in this file reuse fakeYoco()'s default checkout id
+// across multiple payments within a single test — harmless when nothing enforces
+// uniqueness, but a real collision once it's turned on, and that's a fixture artifact
+// unrelated to what this regression is actually about.
 describe('payments — yocoCheckoutId uniqueness', () => {
   beforeEach(async () => {
     await paymentsCollection().createIndexes(paymentsIndexes);
@@ -88,33 +85,6 @@ describe('payments — yocoCheckoutId uniqueness', () => {
 
     expect(first.yocoCheckoutId).toBe('checkout_a');
     expect(second.yocoCheckoutId).toBe('checkout_b');
-  });
-
-  it('lets a subscription-credit-paid booking (never assigned a yocoCheckoutId) coexist with a real Yoco payment', async () => {
-    const userId = new ObjectId();
-    const plan = await subscriptionPlansService.createPlan({
-      name: 'Unlimited', priceCents: 50000, creditsPerPeriod: 2, periodDays: 30,
-    });
-    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
-    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_regression' });
-
-    const creditAppointment = await bookAppointment({ userId, startTime: '09:00' });
-    const creditPayment = await paymentsService.initiateBookingDepositPayment({
-      appointmentId: creditAppointment._id,
-      actor: { _id: userId, role: ROLES.CUSTOMER },
-      useSubscriptionCredit: true,
-      yoco: fakeYoco(),
-    });
-    expect(creditPayment.yocoCheckoutId).toBeUndefined();
-
-    const otherUserId = new ObjectId();
-    const yocoAppointment = await bookAppointment({ userId: otherUserId, startTime: '11:00' });
-    const yocoPayment = await paymentsService.initiateBookingDepositPayment({
-      appointmentId: yocoAppointment._id,
-      actor: { _id: otherUserId, role: ROLES.CUSTOMER },
-      yoco: fakeYoco({ checkoutId: 'checkout_after_credit' }),
-    });
-    expect(yocoPayment.yocoCheckoutId).toBe('checkout_after_credit');
   });
 });
 
@@ -187,6 +157,45 @@ describe('paymentsService.initiateBookingDepositPayment', () => {
       })
     ).rejects.toMatchObject({ statusCode: 400 });
   });
+
+  it('rejects initiating payment once another booking has since been confirmed for the same slot, and cancels the now-unviable appointment', async () => {
+    const userA = new ObjectId();
+    const userB = new ObjectId();
+    // Both hold a pending appointment for the same slot at once — allowed, since neither
+    // has paid yet (only a confirmed appointment blocks a slot).
+    const service = await createTestService({ priceCents: 30000 });
+    const employee = await createTestEmployee();
+    const appointmentA = await bookingService.createAppointment({
+      userId: String(userA),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    const appointmentB = await bookingService.createAppointment({
+      userId: String(userB),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    // A pays and is confirmed first.
+    await appointmentsCollection().updateOne({ _id: appointmentA._id }, { $set: { status: 'confirmed' } });
+
+    // B tries to pay for the same slot — too late, it's gone.
+    await expect(
+      paymentsService.initiateBookingDepositPayment({
+        appointmentId: appointmentB._id,
+        actor: { _id: userB, role: ROLES.CUSTOMER },
+        yoco: fakeYoco(),
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    const stale = await bookingService.getAppointment(appointmentB._id);
+    expect(stale.status).toBe('cancelled');
+    expect(stale.cancelReason).toMatch(/taken by another confirmed booking/i);
+  });
 });
 
 describe('paymentsService.handlePaymentSucceeded — webhook idempotency', () => {
@@ -206,6 +215,58 @@ describe('paymentsService.handlePaymentSucceeded — webhook idempotency', () =>
     const confirmedAppointment = await bookingService.getAppointment(appointment._id);
     expect(confirmedAppointment.status).toBe('confirmed');
     expect(String(confirmedAppointment.paymentId)).toBe(String(payment._id));
+  });
+
+  it('the second of two racing confirmations for the same slot is cancelled and flagged for review, not left to crash the webhook', async () => {
+    const userA = new ObjectId();
+    const userB = new ObjectId();
+    const service = await createTestService({ priceCents: 30000 });
+    const employee = await createTestEmployee();
+
+    const appointmentA = await bookingService.createAppointment({
+      userId: String(userA),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    const appointmentB = await bookingService.createAppointment({
+      userId: String(userB),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const paymentA = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointmentA._id,
+      actor: { _id: userA, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_a' }),
+    });
+    const paymentB = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointmentB._id,
+      actor: { _id: userB, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_b' }),
+    });
+
+    // A's webhook lands first and wins the slot.
+    await paymentsService.handlePaymentSucceeded({ paymentId: paymentA._id, yocoPaymentId: 'pay_a' });
+    // B's webhook lands moments later for a slot that's now already confirmed — must not throw.
+    await expect(
+      paymentsService.handlePaymentSucceeded({ paymentId: paymentB._id, yocoPaymentId: 'pay_b' })
+    ).resolves.toBeUndefined();
+
+    expect((await bookingService.getAppointment(appointmentA._id)).status).toBe('confirmed');
+    const loserAppointment = await bookingService.getAppointment(appointmentB._id);
+    expect(loserAppointment.status).toBe('cancelled');
+    expect(loserAppointment.cancelReason).toMatch(/taken by another confirmed booking/i);
+
+    // B's payment is still marked paid (real money moved) — surfaced for a human to
+    // refund, not silently dropped.
+    expect((await paymentsService.getPayment(paymentB._id)).status).toBe('paid');
+    const reviewEntries = (await (await activityLogCollection().find({ type: 'payment_needs_review' })).toArray());
+    expect(reviewEntries).toHaveLength(1);
+    expect(reviewEntries[0].message).toMatch(/already been confirmed for the same slot/i);
   });
 
   it('is a true no-op on replay — a second delivery cannot undo manual admin changes made in between', async () => {
@@ -485,112 +546,3 @@ describe('paymentsService.initiateBookingDepositPayment — gift card redemption
   });
 });
 
-describe('paymentsService.initiateSubscriptionPurchase + activation', () => {
-  it('activates the subscription with a fresh credit balance once payment succeeds', async () => {
-    const userId = new ObjectId();
-    const plan = await subscriptionPlansService.createPlan({
-      name: 'Monthly Glow',
-      priceCents: 50000,
-      creditsPerPeriod: 4,
-      periodDays: 30,
-    });
-
-    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
-    expect(purchase.amountCents).toBe(50000);
-
-    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_1' });
-
-    const subscription = await subscriptionsService.getUserSubscription(userId);
-    expect(subscription.status).toBe('active');
-    expect(subscription.creditsRemaining).toBe(4);
-  });
-});
-
-describe('paymentsService.initiateBookingDepositPayment — subscription credit', () => {
-  it('covers the deposit with a credit, bypassing Yoco entirely', async () => {
-    const userId = new ObjectId();
-    const appointment = await bookAppointment({ userId });
-
-    const plan = await subscriptionPlansService.createPlan({
-      name: 'Monthly Glow',
-      priceCents: 50000,
-      creditsPerPeriod: 2,
-      periodDays: 30,
-    });
-    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
-    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_2' });
-
-    const payment = await paymentsService.initiateBookingDepositPayment({
-      appointmentId: appointment._id,
-      actor: { _id: userId, role: ROLES.CUSTOMER },
-      useSubscriptionCredit: true,
-      yoco: fakeYoco(),
-    });
-
-    expect(payment.status).toBe('paid');
-    expect(payment.amountCents).toBe(0);
-    expect(payment.redirectUrl).toBeNull();
-
-    const confirmed = await bookingService.getAppointment(appointment._id);
-    expect(confirmed.status).toBe('confirmed');
-
-    const subscription = await subscriptionsService.getUserSubscription(userId);
-    expect(subscription.creditsRemaining).toBe(1);
-  });
-
-  it('rejects a second checkout attempt for the same appointment once a credit confirmed it', async () => {
-    const userId = new ObjectId();
-    const appointment = await bookAppointment({ userId });
-    const plan = await subscriptionPlansService.createPlan({
-      name: 'Monthly Glow',
-      priceCents: 50000,
-      creditsPerPeriod: 2,
-      periodDays: 30,
-    });
-    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
-    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_3' });
-
-    await paymentsService.initiateBookingDepositPayment({
-      appointmentId: appointment._id,
-      actor: { _id: userId, role: ROLES.CUSTOMER },
-      useSubscriptionCredit: true,
-      yoco: fakeYoco(),
-    });
-
-    await expect(
-      paymentsService.initiateBookingDepositPayment({
-        appointmentId: appointment._id,
-        actor: { _id: userId, role: ROLES.CUSTOMER },
-        yoco: fakeYoco(),
-      })
-    ).rejects.toMatchObject({ statusCode: 400 });
-
-    // And the credit wasn't spent twice either.
-    const subscription = await subscriptionsService.getUserSubscription(userId);
-    expect(subscription.creditsRemaining).toBe(1);
-  });
-
-  it('does not let an admin spend a credit on the appointment owner\'s behalf', async () => {
-    const userId = new ObjectId();
-    const appointment = await bookAppointment({ userId });
-    const plan = await subscriptionPlansService.createPlan({
-      name: 'Monthly Glow',
-      priceCents: 50000,
-      creditsPerPeriod: 2,
-      periodDays: 30,
-    });
-    const purchase = await paymentsService.initiateSubscriptionPurchase({ userId, planId: plan._id, yoco: fakeYoco() });
-    await paymentsService.handlePaymentSucceeded({ paymentId: purchase._id, yocoPaymentId: 'pay_sub_4' });
-
-    const payment = await paymentsService.initiateBookingDepositPayment({
-      appointmentId: appointment._id,
-      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
-      useSubscriptionCredit: true,
-      yoco: fakeYoco(),
-    });
-
-    expect(payment.status).toBe('pending'); // fell through to the normal Yoco flow
-    const subscription = await subscriptionsService.getUserSubscription(userId);
-    expect(subscription.creditsRemaining).toBe(2); // untouched
-  });
-});

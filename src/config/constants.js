@@ -31,7 +31,6 @@ export const PERMISSIONS = Object.freeze({
   MANAGE_PAYMENTS: 'manage_payments',
   MANAGE_DISCOUNTS: 'manage_discounts',
   MANAGE_GIFT_CARDS: 'manage_gift_cards',
-  MANAGE_SUBSCRIPTIONS: 'manage_subscriptions',
   MANAGE_LOYALTY: 'manage_loyalty',
   MANAGE_GALLERY: 'manage_gallery',
   MANAGE_CLIENTS: 'manage_clients',
@@ -43,6 +42,9 @@ export const PERMISSIONS = Object.freeze({
   // into MANAGE_SETTINGS — granting someone control over who else has admin access is a
   // meaningfully bigger trust boundary than letting them edit business settings.
   MANAGE_ADMIN_USERS: 'manage_admin_users',
+  // Viewing/marking-read the public contact-form inbox (routes/contact.js) — a mutation
+  // (marking read), so MANAGE_ to match the rest of this enum, not a bare VIEW_.
+  MANAGE_ENQUIRIES: 'manage_enquiries',
 });
 
 export const ALL_ADMIN_PERMISSIONS = Object.values(PERMISSIONS);
@@ -65,6 +67,11 @@ export const PAYMENT_STATUS = Object.freeze({
 
 export const ANY_AVAILABLE_EMPLOYEE = 'any';
 export const SLOT_GRANULARITY_MINUTES = 30;
+// A pending_payment appointment never blocks its slot for anyone else (see
+// bookingService.js's evaluateSlot) — this is purely a hygiene deadline: if payment
+// still hasn't come in after this many minutes, the abandoned appointment is
+// auto-cancelled so it stops cluttering "my bookings"/admin views as if still live.
+export const UNPAID_APPOINTMENT_EXPIRY_MINUTES = 15;
 // Floor so a stacked discount + points redemption can never reduce a Yoco charge to
 // zero/negative — payment gateways require a positive amount.
 export const MIN_CHARGE_CENTS = 100;
@@ -77,5 +84,4 @@ export const GIFT_CARD_MAX_CENTS = 500000; // R5000
 export const PAYMENT_PURPOSE = Object.freeze({
   BOOKING_DEPOSIT: 'booking_deposit',
   GIFT_CARD_PURCHASE: 'gift_card_purchase',
-  SUBSCRIPTION: 'subscription',
 });

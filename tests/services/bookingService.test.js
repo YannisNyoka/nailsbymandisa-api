@@ -21,6 +21,13 @@ async function bookingActor(userId) {
   return { _id: userId, role: ROLES.CUSTOMER };
 }
 
+// Simulates "this appointment's deposit was paid" without going through paymentsService —
+// only a confirmed appointment holds its slot (bookingService.js's SLOT_BLOCKING_STATUSES),
+// so tests that need a genuinely-occupied slot use this rather than createAppointment alone.
+async function confirmDirectly(appointmentId) {
+  await appointmentsCollection().updateOne({ _id: appointmentId }, { $set: { status: 'confirmed' } });
+}
+
 describe('bookingService.quoteBooking', () => {
   it('sums duration/price across services and flags off-peak surcharge', async () => {
     const service = await createTestService({ durationMinutes: 60, priceCents: 30000 });
@@ -80,17 +87,41 @@ describe('bookingService.createAppointment — the shared slot-validation path',
     expect(appointment.guestInfo.email).toBe('guest@example.com');
   });
 
-  it('rejects a double-booking of the same employee/date/time', async () => {
+  it('allows two different customers to each hold a pending appointment for the same slot at once', async () => {
     const service = await createTestService();
     const employee = await createTestEmployee();
 
-    await bookingService.createAppointment({
+    const first = await bookingService.createAppointment({
       userId: String(new ObjectId()),
       employeeId: String(employee._id),
       serviceIds: [String(service._id)],
       date: DATE,
       startTime: '10:00',
     });
+    const second = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    expect(first.status).toBe('pending_payment');
+    expect(second.status).toBe('pending_payment');
+  });
+
+  it('rejects a booking into a slot that is already confirmed (paid)', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    const first = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await confirmDirectly(first._id);
 
     await expect(
       bookingService.createAppointment({
@@ -103,17 +134,18 @@ describe('bookingService.createAppointment — the shared slot-validation path',
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
-  it('rejects an overlapping (not just identical) slot for the same employee', async () => {
+  it('rejects an overlapping (not just identical) slot for the same employee, once confirmed', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const employee = await createTestEmployee();
 
-    await bookingService.createAppointment({
+    const first = await bookingService.createAppointment({
       userId: String(new ObjectId()),
       employeeId: String(employee._id),
       serviceIds: [String(service._id)],
       date: DATE,
       startTime: '10:00', // occupies 10:00-11:00
     });
+    await confirmDirectly(first._id);
 
     await expect(
       bookingService.createAppointment({
@@ -150,18 +182,19 @@ describe('bookingService.createAppointment — the shared slot-validation path',
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
-  it('"any available" resolves to a free employee when the first choice is busy', async () => {
+  it('"any available" resolves to a free employee when the first choice is already confirmed elsewhere', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const busyEmployee = await createTestEmployee({ name: 'Busy' });
     const freeEmployee = await createTestEmployee({ name: 'Free' });
 
-    await bookingService.createAppointment({
+    const busyAppointment = await bookingService.createAppointment({
       userId: String(new ObjectId()),
       employeeId: String(busyEmployee._id),
       serviceIds: [String(service._id)],
       date: DATE,
       startTime: '10:00',
     });
+    await confirmDirectly(busyAppointment._id);
 
     const appointment = await bookingService.createAppointment({
       userId: String(new ObjectId()),
@@ -174,7 +207,7 @@ describe('bookingService.createAppointment — the shared slot-validation path',
     expect(String(appointment.employeeId)).toBe(String(freeEmployee._id));
   });
 
-  it('two concurrent bookings for the same slot: only one wins (atomic write guard)', async () => {
+  it('two concurrent bookings for the same still-unpaid slot both succeed (neither blocks the other)', async () => {
     const service = await createTestService();
     const employee = await createTestEmployee();
 
@@ -188,11 +221,94 @@ describe('bookingService.createAppointment — the shared slot-validation path',
       });
 
     const results = await Promise.allSettled([attempt(), attempt()]);
-    const fulfilled = results.filter((r) => r.status === 'fulfilled');
-    const rejected = results.filter((r) => r.status === 'rejected');
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason.statusCode).toBe(409);
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+  });
+});
+
+describe('bookingService — only a paid appointment holds its slot; a pending one never blocks', () => {
+  it('a pending, unpaid appointment never blocks the slot for someone else, even immediately', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const slots = await bookingService.listAvailableSlots({ serviceIds: [String(service._id)], date: DATE, employeeId: String(employee._id) });
+    expect(slots).toContain('10:00');
+
+    const second = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    expect(second.status).toBe('pending_payment');
+  });
+
+  it('only a confirmed (paid) appointment blocks the slot', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    const paid = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await confirmDirectly(paid._id);
+
+    const slots = await bookingService.listAvailableSlots({ serviceIds: [String(service._id)], date: DATE, employeeId: String(employee._id) });
+    expect(slots).not.toContain('10:00');
+
+    await expect(
+      bookingService.createAppointment({
+        userId: String(new ObjectId()),
+        employeeId: String(employee._id),
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('expireDueUnpaidAppointments cancels only pending appointments whose auto-expire deadline has passed', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    const stale = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '11:00',
+    });
+    await appointmentsCollection().updateOne(
+      { _id: stale._id },
+      { $set: { autoExpireAt: new Date(Date.now() - 60_000) } }
+    );
+
+    const fresh = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '15:00',
+    });
+
+    const result = await bookingService.expireDueUnpaidAppointments();
+    expect(result).toEqual({ expiredCount: 1 });
+
+    const staleAfter = await bookingService.getAppointment(stale._id);
+    expect(staleAfter.status).toBe('cancelled');
+    expect(staleAfter.cancelReason).toMatch(/not completed within/i);
+    expect((await bookingService.getAppointment(fresh._id)).status).toBe('pending_payment');
   });
 });
 
@@ -308,19 +424,20 @@ describe('bookingService.rescheduleAppointment', () => {
     expect(rescheduled.totalPriceCents).toBe(20000 + 5000);
   });
 
-  it('rejects rescheduling into a slot already taken by someone else', async () => {
+  it('rejects rescheduling into a slot already confirmed by someone else', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const employee = await createTestEmployee();
     const userA = new ObjectId();
     const userB = new ObjectId();
 
-    await bookingService.createAppointment({
+    const appointmentA = await bookingService.createAppointment({
       userId: String(userA),
       employeeId: String(employee._id),
       serviceIds: [String(service._id)],
       date: DATE,
       startTime: '09:00',
     });
+    await confirmDirectly(appointmentA._id);
     const appointmentB = await bookingService.createAppointment({
       userId: String(userB),
       employeeId: String(employee._id),
@@ -341,7 +458,27 @@ describe('bookingService.rescheduleAppointment', () => {
 });
 
 describe('bookingService.listAvailableSlots', () => {
-  it('excludes a slot once it is booked and reflects it again once cancelled', async () => {
+  it('does not exclude a slot just because someone holds an unpaid pending appointment for it', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+
+    await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const slots = await bookingService.listAvailableSlots({
+      serviceIds: [String(service._id)],
+      date: DATE,
+      employeeId: String(employee._id),
+    });
+    expect(slots).toContain('10:00');
+  });
+
+  it('excludes a slot once it is confirmed (paid) and reflects it again once cancelled', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const employee = await createTestEmployee({
       workingHours: {
@@ -369,6 +506,7 @@ describe('bookingService.listAvailableSlots', () => {
       date: DATE,
       startTime: '10:00',
     });
+    await confirmDirectly(appointment._id);
 
     const during = await bookingService.listAvailableSlots({
       serviceIds: [String(service._id)],

@@ -8,13 +8,20 @@ const resend = isTest ? null : new Resend(env.RESEND_API_KEY);
 // content is authoritative and delivery doesn't depend on the customer's browser staying
 // open. Sent via Resend (resend.com) rather than raw SMTP — see README "Email (Resend)"
 // for the account/domain-verification setup this depends on.
-export async function sendMail({ to, subject, html, text }) {
+export async function sendMail({ to, subject, html, text, replyTo }) {
   if (isTest) {
     logger.debug({ to, subject }, 'sendMail skipped in test env');
     return;
   }
   try {
-    const { error } = await resend.emails.send({ from: env.EMAIL_FROM, to, subject, html, text });
+    const { error } = await resend.emails.send({
+      from: env.EMAIL_FROM,
+      to,
+      subject,
+      html,
+      text,
+      ...(replyTo ? { replyTo } : {}),
+    });
     // The Resend SDK resolves (doesn't throw) on a provider-level failure — the error
     // comes back in the response body instead, so it has to be checked explicitly or a
     // failure would look identical to success here.

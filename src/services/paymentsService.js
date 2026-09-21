@@ -1,17 +1,16 @@
 import { ObjectId } from 'mongodb';
 import { paymentsCollection } from '../models/payments.js';
-import { appointmentsCollection } from '../models/appointments.js';
+import { appointmentsCollection, DUPLICATE_KEY_ERROR_CODE } from '../models/appointments.js';
 import { usersCollection } from '../models/users.js';
 import * as defaultYoco from '../config/yocoClient.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
+import { checkSlotBookable, cancelUnviableAppointment } from './bookingService.js';
 import { awardPoints, previewRedemption, redeemPoints } from './loyaltyService.js';
 import { completeReferralIfPending } from './referralService.js';
 import { getSettings } from './settingsService.js';
 import { validateDiscountCode, redeemDiscountCode } from './discountsService.js';
 import * as giftCardsService from './giftCardsService.js';
-import * as subscriptionsService from './subscriptionsService.js';
-import { getPlan } from './subscriptionPlansService.js';
 import { sendMail } from '../config/mailer.js';
 import { env } from '../config/env.js';
 import {
@@ -46,7 +45,6 @@ export async function initiateBookingDepositPayment({
   pointsToRedeem = 0,
   discountCode = null,
   giftCardCode = null,
-  useSubscriptionCredit = false,
   yoco = defaultYoco,
 }) {
   const appointment = await appointmentsCollection().findOne({ _id: new ObjectId(appointmentId) });
@@ -63,50 +61,20 @@ export async function initiateBookingDepositPayment({
     throw badRequest('This appointment is not awaiting payment.');
   }
 
-  // §4.8 — a subscription credit fully covers the deposit and bypasses Yoco entirely
-  // (no discount/points/gift-card stacking makes sense against a R0 charge). Only the
-  // appointment's own owner can spend their own credit — same rule as loyalty points.
-  // Consuming the credit is atomic (subscriptionsService.useCredit); if that succeeds,
-  // confirming the appointment happens synchronously here rather than via webhook, so a
-  // second call for the same appointment is blocked by the PENDING_PAYMENT check above
-  // once this one flips it to CONFIRMED — no separate dedup needed for this path.
-  if (useSubscriptionCredit && isOwner) {
-    await subscriptionsService.useCredit({ userId: appointment.userId });
-    const now = new Date();
-    const doc = {
-      purpose: PAYMENT_PURPOSE.BOOKING_DEPOSIT,
-      appointmentId: appointment._id,
-      giftCardId: null,
-      subscriptionId: null,
-      userId: appointment.userId,
-      guestEmail: null,
-      amountCents: 0,
-      originalAmountCents: appointment.depositCents,
-      pointsRedeemed: 0,
-      redemptionValueCents: 0,
-      discountCode: null,
-      discountValueCents: 0,
-      giftCardCode: null,
-      giftCardValueCents: 0,
-      currency: 'ZAR',
-      status: PAYMENT_STATUS.PAID,
-      // yocoCheckoutId deliberately omitted, not set to null — this path pays via
-      // subscription credit and never touches Yoco, so there's never a real value coming.
-      // yocoCheckoutId has a unique+sparse index (models/payments.js); a *sparse* index
-      // still indexes an explicit null (it only skips a genuinely missing field), so
-      // setting it to null here would let only one such payment ever exist before every
-      // later one collided with E11000 — exactly the bug this fixes (see README).
-      yocoPaymentId: null,
-      redirectUrl: null,
-      refunds: [],
-      refundedAmountCents: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const { insertedId } = await paymentsCollection().insertOne(doc);
-    const paid = { ...doc, _id: insertedId };
-    await confirmAppointmentForPaidDeposit(paid);
-    return paid;
+  // Only a paid appointment holds its slot (bookingService.js's evaluateSlot) — this
+  // pending appointment never blocked anyone else, so someone else may since have been
+  // confirmed for the exact same slot. Re-check right before sending the customer to
+  // Yoco rather than after: don't charge them for a booking that's already gone.
+  const stillBookable = await checkSlotBookable({
+    employeeId: appointment.employeeId,
+    date: appointment.date,
+    startTime: appointment.startTime,
+    endTime: appointment.endTime,
+    excludeAppointmentId: appointment._id,
+  });
+  if (!stillBookable.bookable) {
+    await cancelUnviableAppointment(appointment, 'This slot was taken by another confirmed booking before payment was completed.');
+    throw conflict('This slot was just taken by another booking. Please choose a different time.');
   }
 
   const existing = await paymentsCollection().findOne({
@@ -173,7 +141,6 @@ export async function initiateBookingDepositPayment({
     purpose: PAYMENT_PURPOSE.BOOKING_DEPOSIT,
     appointmentId: appointment._id,
     giftCardId: null,
-    subscriptionId: null,
     userId: appointment.userId,
     guestEmail: appointment.guestInfo?.email ?? null,
     amountCents,
@@ -272,7 +239,6 @@ export async function initiateGiftCardPurchase({ amountCents, purchaserUserId, p
     purpose: PAYMENT_PURPOSE.GIFT_CARD_PURCHASE,
     appointmentId: null,
     giftCardId: giftCard._id,
-    subscriptionId: null,
     userId: purchaserUserId ? new ObjectId(purchaserUserId) : null,
     guestEmail: purchaserUserId ? null : purchaserEmail,
     amountCents,
@@ -315,77 +281,63 @@ export async function initiateGiftCardPurchase({ amountCents, purchaserUserId, p
   return getPayment(insertedId);
 }
 
-// §4.8 — subscribing and renewing are the same call: upsertPendingSubscription() either
-// creates the customer's one subscription document or reuses it (keeping it active
-// through a renewal so they don't lose access mid-payment). No automatic recurring
-// billing here — Yoco's Checkout API is one-off sessions, not a stored-card/recurring
-// primitive, so renewal is a customer-triggered repeat of this same call.
-export async function initiateSubscriptionPurchase({ userId, planId, yoco = defaultYoco }) {
-  const plan = await getPlan(planId);
-  if (!plan.isActive) throw badRequest('This plan is no longer available.');
-
-  const subscription = await subscriptionsService.upsertPendingSubscription({ userId, planId });
-
-  const now = new Date();
-  const doc = {
-    purpose: PAYMENT_PURPOSE.SUBSCRIPTION,
-    appointmentId: null,
-    giftCardId: null,
-    subscriptionId: subscription._id,
-    userId: new ObjectId(userId),
-    guestEmail: null,
-    amountCents: plan.priceCents,
-    originalAmountCents: plan.priceCents,
-    pointsRedeemed: 0,
-    redemptionValueCents: 0,
-    discountCode: null,
-    discountValueCents: 0,
-    giftCardCode: null,
-    giftCardValueCents: 0,
-    currency: 'ZAR',
-    status: PAYMENT_STATUS.PENDING,
-    // yocoCheckoutId deliberately omitted here, set via $set once Yoco responds below —
-    // see initiateBookingDepositPayment's PAID branch for why an explicit null would
-    // collide on the unique+sparse index.
-    yocoPaymentId: null,
-    redirectUrl: null,
-    refunds: [],
-    refundedAmountCents: 0,
-    createdAt: now,
-    updatedAt: now,
-  };
-  const { insertedId } = await paymentsCollection().insertOne(doc);
-
-  const checkout = await yoco.createCheckout({
-    amountCents: doc.amountCents,
-    currency: doc.currency,
-    successUrl: `${env.CLIENT_URL}/account/subscription?status=success`,
-    cancelUrl: `${env.CLIENT_URL}/subscriptions/plans?status=cancelled`,
-    failureUrl: `${env.CLIENT_URL}/subscriptions/plans?status=failed`,
-    metadata: { paymentId: String(insertedId) },
-    idempotencyKey: String(insertedId),
-  });
-
-  await paymentsCollection().updateOne(
-    { _id: insertedId },
-    { $set: { yocoCheckoutId: checkout.id, redirectUrl: checkout.redirectUrl, updatedAt: new Date() } }
-  );
-
-  return getPayment(insertedId);
-}
-
-// Shared by both the async Yoco webhook path (handlePaymentSucceeded) and the synchronous
-// subscription-credit path (initiateBookingDepositPayment, which bypasses Yoco entirely
-// when a credit covers the deposit) — §6.2, one function, every caller. `updated` is a
-// payment already atomically transitioned to PAID by the caller; this only runs the
-// appointment-confirmation side effects and is itself guarded by the appointment's own
-// pending→confirmed transition, so it's safe even if somehow invoked twice.
+// §6.2 — one function, every caller that needs to run the "a booking deposit just got
+// paid" side effects. `updated` is a payment already atomically transitioned to PAID by
+// the caller; this only runs the appointment-confirmation side effects and is itself
+// guarded by the appointment's own pending→confirmed transition, so it's safe even if
+// somehow invoked twice.
 async function confirmAppointmentForPaidDeposit(updated) {
-  const appointment = await appointmentsCollection().findOneAndUpdate(
-    { _id: updated.appointmentId, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
-    { $set: { status: APPOINTMENT_STATUS.CONFIRMED, paymentId: updated._id, updatedAt: new Date() } }
-  );
-  if (!appointment) return;
+  let appointment;
+  try {
+    appointment = await appointmentsCollection().findOneAndUpdate(
+      { _id: updated.appointmentId, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
+      {
+        $set: {
+          status: APPOINTMENT_STATUS.CONFIRMED,
+          paymentId: updated._id,
+          autoExpireAt: null,
+          updatedAt: new Date(),
+        },
+      }
+    );
+  } catch (err) {
+    if (err.code !== DUPLICATE_KEY_ERROR_CODE) throw err;
+    // Only a paid appointment holds its slot, so two customers can each be mid-checkout
+    // for the same slot at once — the initiate-checkout guard re-checks availability
+    // right before Yoco, but can't close the window between that check and the webhook
+    // itself. This is that residual race: another booking was confirmed for the exact
+    // same slot in between, and this update collided with the unique index. This
+    // customer's payment DID succeed, so it can't just be dropped — cancel the now-
+    // unviable appointment and flag the payment loudly for a manual refund.
+    const current = await appointmentsCollection().findOne({ _id: updated.appointmentId });
+    if (current) {
+      await cancelUnviableAppointment(current, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
+    }
+    await logActivity({
+      type: 'payment_needs_review',
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for the same slot by the time it processed. Needs manual refund.`,
+      actorUserId: current?.userId ?? null,
+      metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
+    });
+    return;
+  }
+  if (!appointment) {
+    // The initiate-checkout guard above should catch a slot that's already gone before
+    // the customer ever reaches Yoco, but this webhook is the source of truth for "did
+    // they pay" and can't be skipped — so if the appointment stopped being
+    // pending_payment in the narrow window between checkout and this call (e.g. an admin
+    // cancelled it), a real payment was captured for a slot that's no longer held.
+    // Surface it for manual follow-up rather than silently dropping a paid-but-
+    // unconfirmed booking.
+    const current = await appointmentsCollection().findOne({ _id: updated.appointmentId });
+    await logActivity({
+      type: 'payment_needs_review',
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but its appointment is no longer awaiting payment (status: ${current?.status ?? 'unknown'}). Needs manual refund or rebooking.`,
+      actorUserId: current?.userId ?? null,
+      metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
+    });
+    return;
+  }
 
   await sendBookingConfirmationEmail(appointment);
   if (appointment.userId) {
@@ -399,8 +351,7 @@ async function confirmAppointmentForPaidDeposit(updated) {
 
     const settings = await getSettings();
     // §4.5 — 1 point per R1 of what was actually charged (net of any discount/points
-    // already applied at checkout — see initiateBookingDepositPayment). A subscription
-    // credit charges R0, so it earns 0 points — consistent with "points on what was paid".
+    // already applied at checkout — see initiateBookingDepositPayment).
     const pointsEarned = Math.floor((updated.amountCents / 100) * settings.loyalty.pointsPerRand);
     if (pointsEarned > 0) {
       await awardPoints({
@@ -460,33 +411,6 @@ export async function handlePaymentSucceeded({ paymentId, yocoPaymentId }) {
         message: `Gift card ${giftCard.code} purchased for R${(giftCard.balanceCents / 100).toFixed(2)}`,
         actorUserId: updated.userId,
         metadata: { paymentId: String(updated._id), giftCardId: String(giftCard._id) },
-      });
-    }
-  }
-
-  if (updated.purpose === PAYMENT_PURPOSE.SUBSCRIPTION && updated.subscriptionId) {
-    const subscription = await subscriptionsService.activateSubscription({
-      subscriptionId: updated.subscriptionId,
-      paymentId: updated._id,
-    });
-    if (subscription) {
-      const plan = await getPlan(subscription.planId);
-      // activateSubscription()'s findOneAndUpdate returns the PRE-update document (same
-      // convention as everywhere else in this codebase) — build the notification from
-      // the plan's own figures rather than the (now-stale) returned subscription fields.
-      const validUntil = new Date(Date.now() + plan.periodDays * 86_400_000).toLocaleDateString();
-      await createClientNotification({
-        userId: updated.userId,
-        type: 'admin_message',
-        title: 'Subscription active',
-        body: `Your subscription is active with ${plan.creditsPerPeriod} credits, valid until ${validUntil}.`,
-        link: '/account/subscription',
-      });
-      await logActivity({
-        type: 'subscription_activated',
-        message: `Subscription activated for plan ${plan.name}`,
-        actorUserId: updated.userId,
-        metadata: { paymentId: String(updated._id), subscriptionId: String(updated.subscriptionId) },
       });
     }
   }

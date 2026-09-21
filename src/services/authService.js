@@ -164,12 +164,28 @@ export async function refresh({ rawRefreshToken }) {
   if (!stored) throw unauthorized('Invalid refresh token.');
 
   if (stored.revokedAt || stored.expiresAt < new Date()) {
+    // Within the grace window, walk forward through however many times this token's
+    // family has since rotated — not just one hop. A single stale presentation can
+    // legitimately be several rotations behind (e.g. a backgrounded tab waking up while
+    // another tab kept the session alive, or several near-simultaneous reloads each
+    // triggering their own refresh) — checking only `stored.replacedByTokenHash` finds
+    // that replacement *also* already revoked and wrongly falls through to theft
+    // detection, logging a real, still-active user out (found via a real repro: 8 quick
+    // page loads in a row). The grace window is still anchored to the originally
+    // presented token's own revocation time, so this doesn't widen the actual theft
+    // window — it only follows the chain to whatever the *current* tip is.
     if (stored.revokedAt && stored.replacedByTokenHash && Date.now() - stored.revokedAt.getTime() < REFRESH_REUSE_GRACE_MS) {
-      const replacement = await refreshTokensCollection().findOne({ tokenHash: stored.replacedByTokenHash });
-      if (replacement && !replacement.revokedAt && replacement.expiresAt > new Date()) {
-        const user = await usersCollection().findOne({ _id: replacement.userId });
+      let tip = stored;
+      while (tip.replacedByTokenHash) {
+        // eslint-disable-next-line no-await-in-loop -- bounded by how many times this one token family has rotated, not a collection scan
+        const next = await refreshTokensCollection().findOne({ tokenHash: tip.replacedByTokenHash });
+        if (!next) break;
+        tip = next;
+      }
+      if (!tip.revokedAt && tip.expiresAt > new Date()) {
+        const user = await usersCollection().findOne({ _id: tip.userId });
         if (user && user.isActive) {
-          const rotated = await rotateFrom(replacement, user);
+          const rotated = await rotateFrom(tip, user);
           if (rotated) return rotated;
         }
       }

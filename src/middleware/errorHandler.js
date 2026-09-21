@@ -42,6 +42,17 @@ function normalizeError(err) {
     wrapped.isOperational = true;
     return wrapped;
   }
+  // Cloudinary's own SDK-level timeout (http_code 499 — a real ~18MB video upload hit
+  // this at the ~2-minute mark before config/cloudinaryClient.js's `timeout` was raised)
+  // — this is neither the uploader's file being bad nor our own bug, so it's operational
+  // (safe to show) but a distinct 504 rather than pretending it's a normal 400.
+  if (err.http_code === 499 || err.name === 'TimeoutError') {
+    const wrapped = new Error('The upload took too long and timed out. Try again, or use a shorter/smaller file.');
+    wrapped.statusCode = 504;
+    wrapped.code = 'UPLOAD_TIMEOUT';
+    wrapped.isOperational = true;
+    return wrapped;
+  }
   return err;
 }
 

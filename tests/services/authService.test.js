@@ -83,6 +83,21 @@ describe('authService.refresh — rotation and reuse detection', () => {
     void resultA;
   });
 
+  it('follows multiple hops of rotation within the grace window, not just one (real repro: several quick page loads in a row)', async () => {
+    const { refreshToken: gen1 } = await authService.register(testUser);
+    const { refreshToken: gen2 } = await authService.refresh({ rawRefreshToken: gen1 });
+    // Rotate twice more in quick succession, as separate page loads each triggering
+    // their own refresh would — gen1's `replacedByTokenHash` only points at gen2, which
+    // is itself now also revoked. Presenting the original gen1 token again must still
+    // resolve to the *current* tip (gen4) rather than failing after one hop.
+    const { refreshToken: gen3 } = await authService.refresh({ rawRefreshToken: gen2 });
+    await authService.refresh({ rawRefreshToken: gen3 });
+
+    const result = await authService.refresh({ rawRefreshToken: gen1 });
+    expect(result.accessToken).toEqual(expect.any(String));
+    expect(result.refreshToken).toEqual(expect.any(String));
+  });
+
   it('rejects reuse well outside the grace window and revokes the whole family (real theft)', async () => {
     const { refreshToken: first } = await authService.register(testUser);
     const { refreshToken: second } = await authService.refresh({ rawRefreshToken: first });

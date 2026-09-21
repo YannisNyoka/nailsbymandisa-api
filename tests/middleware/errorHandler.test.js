@@ -57,6 +57,18 @@ describe('errorHandler', () => {
     expect(res.statusCode).toBe(500);
   });
 
+  // Regression for a real production incident: a genuine ~18MB video upload hit
+  // Cloudinary's own SDK-level timeout (`http_code: 499, name: 'TimeoutError'`) at the
+  // ~2-minute mark. This used to fall through to a generic, unhelpful 500 — now it's a
+  // clean 504 with a message that tells the admin what actually happened.
+  it('normalizes a Cloudinary upload timeout (http_code 499) into a clean 504, not a 500', () => {
+    const err = { message: 'Request Timeout', http_code: 499, name: 'TimeoutError' };
+    const res = fakeRes();
+    errorHandler(err, {}, res, () => {});
+    expect(res.statusCode).toBe(504);
+    expect(res.body.error.code).toBe('UPLOAD_TIMEOUT');
+  });
+
   it('falls back to a generic 500 for an unrecognized error', () => {
     const res = fakeRes();
     errorHandler(new Error('something unexpected'), {}, res, () => {});

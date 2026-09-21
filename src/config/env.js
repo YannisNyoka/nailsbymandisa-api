@@ -48,6 +48,11 @@ const envSchema = z
     // dashboard before it can send to anyone other than the account owner.
     RESEND_API_KEY: z.string().min(1, 'Resend API key is required (resend.com → API Keys)'),
     EMAIL_FROM: z.string().min(1),
+    // Where a public contact-form submission (routes/contact.js) gets emailed. Optional
+    // with a hardcoded fallback (the salon's own published address, also in the site
+    // footer) so this doesn't become a new required var on an already-deployed Render
+    // service — a missing required var fails startup outright (see loadEnv() below).
+    CONTACT_INBOX_EMAIL: z.string().email().optional().or(z.literal('')),
 
     // Shared secret the reminders cron workflow presents via the X-Cron-Secret header —
     // see routes/cron.js. Deliberately separate from the JWT secrets: this authenticates

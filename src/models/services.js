@@ -21,6 +21,10 @@ export const servicesJsonSchema = {
     properties: {
       name: { bsonType: 'string', minLength: 1 },
       description: { bsonType: ['string', 'null'] },
+      // Shown on the public services list/card (HomePage.jsx) — a Cloudinary URL from the
+      // same /uploads/image endpoint the hero slideshow and gallery use. Not in `required`
+      // for forward-compat with services created before this field existed.
+      imageUrl: { bsonType: ['string', 'null'] },
       category: { enum: SERVICE_CATEGORIES },
       durationMinutes: { bsonType: 'int', minimum: 5, maximum: 480 },
       priceCents: { bsonType: 'int', minimum: 0 },

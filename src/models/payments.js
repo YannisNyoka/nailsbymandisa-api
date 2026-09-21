@@ -23,7 +23,6 @@ export const paymentsJsonSchema = {
       'purpose',
       'appointmentId',
       'giftCardId',
-      'subscriptionId',
       'userId',
       'guestEmail',
       'amountCents',
@@ -38,7 +37,10 @@ export const paymentsJsonSchema = {
       purpose: { enum: Object.values(PAYMENT_PURPOSE) },
       appointmentId: { bsonType: ['objectId', 'null'] },
       giftCardId: { bsonType: ['objectId', 'null'] },
-      subscriptionId: { bsonType: ['objectId', 'null'] },
+      // `subscriptionId` intentionally removed (subscriptions feature removed) — not
+      // added back to `properties` as `additionalProperties` isn't restricted here, so an
+      // old historical document that still has the field (there are none in production as
+      // of removal) would remain readable; new documents just never set it.
       userId: { bsonType: ['objectId', 'null'] },
       guestEmail: { bsonType: ['string', 'null'] },
       // Server-computed at write time — never accepted from the client (§5.1).

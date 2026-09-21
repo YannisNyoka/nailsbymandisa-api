@@ -1,0 +1,30 @@
+name: Expire abandoned unpaid appointments
+
+# A pending_payment appointment never blocks its slot for anyone else (see
+# bookingService.js's SLOT_BLOCKING_STATUSES) — this job is pure hygiene, not load
+# bearing for double-booking correctness. It formally cancels appointments nobody ever
+# paid for, so they stop cluttering "my bookings"/admin views as if still awaiting
+# payment. Runs every 5 minutes (vs. the reminders job's hourly cadence) since the
+# expiry window itself is short (UNPAID_APPOINTMENT_EXPIRY_MINUTES, src/config/constants.js).
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  expire-unpaid-appointments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call POST /api/cron/expire-unpaid-appointments
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" -X POST "${API_URL%/}/api/cron/expire-unpaid-appointments" \
+            -H "X-Cron-Secret: $CRON_SECRET")
+          echo "HTTP status: $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            echo "Expire-unpaid-appointments call failed"
+            exit 1
+          fi
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -77,6 +77,20 @@ describe('services CRUD', () => {
     expect(adminListAfter.body.services).toHaveLength(1);
   });
 
+  it('accepts and round-trips an imageUrl for the public services list', async () => {
+    const token = await adminToken();
+
+    const createRes = await request(app)
+      .post('/api/services')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...sampleService, imageUrl: 'https://res.cloudinary.com/demo/image/upload/v1/gel-manicure.jpg' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.service.imageUrl).toBe('https://res.cloudinary.com/demo/image/upload/v1/gel-manicure.jpg');
+
+    const publicList = await request(app).get('/api/services');
+    expect(publicList.body.services[0].imageUrl).toBe('https://res.cloudinary.com/demo/image/upload/v1/gel-manicure.jpg');
+  });
+
   it('returns a clean 400 for a malformed id, not a 500', async () => {
     // Every :id route ultimately does `new ObjectId(req.params.id)` somewhere; a
     // malformed id must not surface as an unhandled 500 (§5.6/§5.11).

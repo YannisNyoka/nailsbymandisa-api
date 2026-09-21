@@ -14,6 +14,12 @@ if (isConfigured) {
     api_key: env.CLOUDINARY_API_KEY,
     api_secret: env.CLOUDINARY_API_SECRET,
     secure: true,
+    // Cloudinary's own SDK default timeout is too short for a real video upload — a real
+    // ~18MB file was still uploading at the ~2-minute mark and got cut off by Cloudinary
+    // itself (`http_code: 499, name: 'TimeoutError'`), not by anything on our side. 5
+    // minutes gives real-world upload speeds (and Cloudinary's own video processing,
+    // which is slower than its image path) enough room.
+    timeout: 300_000,
   });
 }
 

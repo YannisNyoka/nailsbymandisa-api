@@ -54,24 +54,32 @@ export const appointmentsJsonSchema = {
       // guard that makes the reminders job idempotent no matter how often it runs. Not in
       // `required` for forward-compat with documents predating this field.
       reminderSentAt: { bsonType: ['date', 'null'] },
+      // Only meaningful while status is pending_payment — a pending appointment never
+      // blocks its slot for anyone else (see bookingService.js's evaluateSlot), so this
+      // isn't about freeing the slot. It's the deadline after which an abandoned,
+      // never-paid appointment gets auto-cancelled for hygiene (bookingService's
+      // expireDueUnpaidAppointments). Not in `required` for forward-compat with documents
+      // predating this field.
+      autoExpireAt: { bsonType: ['date', 'null'] },
       createdAt: { bsonType: 'date' },
       updatedAt: { bsonType: 'date' },
     },
   },
 };
 
-// Partial unique index — only one pending/confirmed appointment can occupy a given
-// (date, employeeId, startTime). Cancelled/completed/no-show rows are excluded so
-// history never blocks a new booking, but this is what makes double-booking impossible
-// at the database level rather than relying solely on the application-level check (§3, §4.3).
+// Partial unique index — only one CONFIRMED (i.e. paid) appointment can occupy a given
+// (date, employeeId, startTime). Deliberately excludes pending_payment: only a paid
+// appointment holds its slot, so two people can each hold a pending appointment for the
+// same slot at once (whoever pays first wins it; see paymentsService.js's
+// confirmAppointmentForPaidDeposit for how the loser is handled) — this index is what
+// makes "only one CONFIRMED booking per slot" impossible to violate at the database
+// level, rather than relying solely on the application-level check (§3, §4.3).
 export const appointmentsIndexes = [
   {
     key: { date: 1, employeeId: 1, startTime: 1 },
     unique: true,
     name: 'uniq_active_slot',
-    partialFilterExpression: {
-      status: { $in: [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED] },
-    },
+    partialFilterExpression: { status: APPOINTMENT_STATUS.CONFIRMED },
   },
   { key: { userId: 1, date: -1 }, name: 'idx_user_date' },
   { key: { employeeId: 1, date: 1 }, name: 'idx_employee_date' },

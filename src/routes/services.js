@@ -29,6 +29,7 @@ router.get('/:id', async (req, res, next) => {
 const serviceSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(2000).nullable().optional(),
+  imageUrl: z.string().url().max(2000).nullable().optional(),
   category: z.enum(SERVICE_CATEGORIES),
   durationMinutes: z.number().int().min(5).max(480),
   priceCents: z.number().int().min(0),

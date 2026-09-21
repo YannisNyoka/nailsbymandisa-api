@@ -32,18 +32,13 @@ import {
 } from './loyaltyTransactions.js';
 import { COLLECTION as REFERRALS, referralsJsonSchema, referralsIndexes } from './referrals.js';
 import { COLLECTION as GIFT_CARDS, giftCardsJsonSchema, giftCardsIndexes } from './giftCards.js';
-import {
-  COLLECTION as SUBSCRIPTION_PLANS,
-  subscriptionPlansJsonSchema,
-  subscriptionPlansIndexes,
-} from './subscriptionPlans.js';
-import { COLLECTION as SUBSCRIPTIONS, subscriptionsJsonSchema, subscriptionsIndexes } from './subscriptions.js';
 import { COLLECTION as GALLERY, galleryJsonSchema, galleryIndexes } from './gallery.js';
 import {
   COLLECTION as CLIENT_GALLERY,
   clientGalleryJsonSchema,
   clientGalleryIndexes,
 } from './clientGallery.js';
+import { COLLECTION as ENQUIRIES, enquiriesJsonSchema, enquiriesIndexes } from './enquiries.js';
 
 // Applies MongoDB JSON Schema validators and indexes for every collection at boot —
 // §3 requires this on every collection touched by money or slot availability, and we
@@ -58,9 +53,35 @@ async function ensureCollection(db, name, validator, indexes) {
     await db.command({ collMod: name, validator, validationLevel: 'strict' });
   }
   if (indexes?.length) {
-    await db.collection(name).createIndexes(indexes);
+    await syncIndexes(db.collection(name), indexes);
   }
   logger.debug({ collection: name }, 'Schema validation + indexes applied');
+}
+
+// createIndexes() throws IndexOptionsConflict if a same-named index already exists with
+// a different definition — e.g. a partialFilterExpression that's changed since the index
+// was first created (as appointments.js's uniq_active_slot did, to stop pending_payment
+// appointments from holding a slot). Drop any same-named index whose live definition no
+// longer matches before recreating it, so an index definition can evolve across deploys
+// without a manual one-off migration run against the production database.
+async function syncIndexes(collection, desiredIndexes) {
+  const existingIndexes = await collection.indexes();
+  for (const desired of desiredIndexes) {
+    const existing = existingIndexes.find((idx) => idx.name === desired.name);
+    if (existing && !indexDefinitionMatches(existing, desired)) {
+      // eslint-disable-next-line no-await-in-loop -- boot-time migration, not a hot path
+      await collection.dropIndex(desired.name);
+    }
+  }
+  await collection.createIndexes(desiredIndexes);
+}
+
+function indexDefinitionMatches(existing, desired) {
+  return (
+    JSON.stringify(existing.key) === JSON.stringify(desired.key) &&
+    JSON.stringify(existing.partialFilterExpression ?? null) === JSON.stringify(desired.partialFilterExpression ?? null) &&
+    Boolean(existing.unique) === Boolean(desired.unique)
+  );
 }
 
 export async function applySchemaValidation() {
@@ -81,8 +102,7 @@ export async function applySchemaValidation() {
   await ensureCollection(db, LOYALTY_TRANSACTIONS, loyaltyTransactionsJsonSchema, loyaltyTransactionsIndexes);
   await ensureCollection(db, REFERRALS, referralsJsonSchema, referralsIndexes);
   await ensureCollection(db, GIFT_CARDS, giftCardsJsonSchema, giftCardsIndexes);
-  await ensureCollection(db, SUBSCRIPTION_PLANS, subscriptionPlansJsonSchema, subscriptionPlansIndexes);
-  await ensureCollection(db, SUBSCRIPTIONS, subscriptionsJsonSchema, subscriptionsIndexes);
   await ensureCollection(db, GALLERY, galleryJsonSchema, galleryIndexes);
   await ensureCollection(db, CLIENT_GALLERY, clientGalleryJsonSchema, clientGalleryIndexes);
+  await ensureCollection(db, ENQUIRIES, enquiriesJsonSchema, enquiriesIndexes);
 }

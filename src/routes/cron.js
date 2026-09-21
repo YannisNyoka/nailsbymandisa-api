@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import * as remindersService from '../services/remindersService.js';
+import * as bookingService from '../services/bookingService.js';
 import { env } from '../config/env.js';
 import { unauthorized } from '../utils/AppError.js';
 import { cronLimiter } from '../middleware/rateLimit.js';
@@ -24,6 +25,17 @@ function requireCronSecret(req, res, next) {
 router.post('/reminders', cronLimiter, requireCronSecret, async (req, res, next) => {
   try {
     res.json(await remindersService.sendDueReminders());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// A pending_payment appointment never blocks its slot for anyone else — this is pure
+// hygiene, formally cancelling abandoned never-paid appointments so they stop showing up
+// as "awaiting payment" in the customer's and admin's booking lists.
+router.post('/expire-unpaid-appointments', cronLimiter, requireCronSecret, async (req, res, next) => {
+  try {
+    res.json(await bookingService.expireDueUnpaidAppointments());
   } catch (err) {
     next(err);
   }

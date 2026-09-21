@@ -15,7 +15,6 @@ const checkoutSchema = z.object({
   pointsToRedeem: z.number().int().min(0).optional(),
   discountCode: z.string().min(1).max(20).optional(),
   giftCardCode: z.string().min(1).max(20).optional(),
-  useSubscriptionCredit: z.boolean().optional(),
 });
 
 router.post(
@@ -31,7 +30,6 @@ router.post(
         pointsToRedeem: req.body.pointsToRedeem,
         discountCode: req.body.discountCode,
         giftCardCode: req.body.giftCardCode,
-        useSubscriptionCredit: req.body.useSubscriptionCredit,
       });
       res.status(201).json({ payment });
     } catch (err) {

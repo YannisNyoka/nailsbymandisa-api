@@ -81,7 +81,21 @@ export async function initiateBookingDepositPayment({
     appointmentId: appointment._id,
     status: PAYMENT_STATUS.PENDING,
   });
-  if (existing) return existing;
+  if (existing) {
+    // A real, reusable pending checkout always has a redirectUrl — reuse it as before.
+    if (existing.redirectUrl) return existing;
+    // Found via a real repro: a previous attempt got as far as reserving this payment
+    // record but never got a real checkout back from Yoco (e.g. a transient Yoco error,
+    // or the account's live keys rejecting a non-HTTPS CLIENT_URL locally) — reusing it
+    // would hand the customer a null redirectUrl, and `window.location.href = null`
+    // silently strands them on a 404 instead of ever letting them pay, with no way to
+    // recover short of contacting support. Mark it failed and fall through to create a
+    // fresh checkout instead.
+    await paymentsCollection().updateOne(
+      { _id: existing._id },
+      { $set: { status: PAYMENT_STATUS.FAILED, updatedAt: new Date() } }
+    );
+  }
 
   const originalAmountCents = appointment.depositCents;
   let amountCents = originalAmountCents;

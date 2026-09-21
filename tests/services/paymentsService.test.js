@@ -120,6 +120,40 @@ describe('paymentsService.initiateBookingDepositPayment', () => {
     expect(yoco.counts.checkoutCalls).toBe(1);
   });
 
+  it('does not reuse a stale pending payment that never got a real checkout back from Yoco, and creates a working one instead', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    const actor = { _id: userId, role: ROLES.CUSTOMER };
+
+    // Simulates a previous attempt that reserved a payment record but failed before Yoco
+    // ever returned a checkout — e.g. a transient Yoco error, or a rejected request.
+    await paymentsCollection().insertOne({
+      appointmentId: appointment._id,
+      userId,
+      guestEmail: null,
+      purpose: 'booking_deposit',
+      amountCents: appointment.depositCents,
+      currency: 'ZAR',
+      status: 'pending',
+      yocoCheckoutId: null,
+      redirectUrl: null,
+      refunds: [],
+      refundedAmountCents: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const yoco = fakeYoco({ checkoutId: 'checkout_recovered' });
+    const payment = await paymentsService.initiateBookingDepositPayment({ appointmentId: appointment._id, actor, yoco });
+
+    expect(payment.redirectUrl).toBeTruthy();
+    expect(payment.redirectUrl).toContain('checkout_recovered');
+    expect(yoco.counts.checkoutCalls).toBe(1);
+
+    const stale = await paymentsCollection().findOne({ appointmentId: appointment._id, status: 'failed' });
+    expect(stale).toBeTruthy();
+  });
+
   it('lets a guest initiate payment for their own guest booking with no auth', async () => {
     const appointment = await bookAppointment({});
     const payment = await paymentsService.initiateBookingDepositPayment({

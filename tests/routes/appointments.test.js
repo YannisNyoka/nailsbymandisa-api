@@ -40,6 +40,51 @@ describe('POST /api/appointments', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects a public guest booking once an admin turns off guest checkout', async () => {
+    const { accessToken: adminToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_SETTINGS],
+    });
+    await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ allowGuestBooking: false });
+
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const res = await request(app)
+      .post('/api/appointments')
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+        employeeId: String(employee._id),
+        guestInfo: { name: 'Guest', email: 'guest@example.com', phone: '0821234567' },
+      });
+    expect(res.status).toBe(403);
+
+    // A logged-in customer is unaffected — only the public guest path is gated.
+    const { accessToken: customerToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const asCustomer = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .send({ serviceIds: [String(service._id)], date: DATE, startTime: '10:00', employeeId: String(employee._id) });
+    expect(asCustomer.status).toBe(201);
+
+    // An admin creating a guest (walk-in/phone) booking on a client's behalf is also unaffected.
+    const asAdmin = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '11:00',
+        employeeId: String(employee._id),
+        guestInfo: { name: 'Phone Client', email: 'phone-client@example.com', phone: '0821234567' },
+      });
+    expect(asAdmin.status).toBe(201);
+  });
+
   it('never trusts a client-submitted price — only serviceIds/date/time are accepted', async () => {
     const service = await createTestService({ priceCents: 30000 });
     const employee = await createTestEmployee();

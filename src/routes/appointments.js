@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import * as bookingService from '../services/bookingService.js';
+import { getSettings } from '../services/settingsService.js';
 import { appointmentsCollection } from '../models/appointments.js';
 import { usersCollection } from '../models/users.js';
 import { validate } from '../middleware/validate.js';
@@ -70,6 +71,13 @@ router.post('/', optionalAuthenticate, checkoutLimiter, validate(createAppointme
     } else if (req.user) {
       userId = req.user._id;
     } else if (req.body.guestInfo) {
+      // Admin-initiated guest bookings (phone/walk-in clients, handled above) are never
+      // affected by this — only the public, unauthenticated checkout path is, and only
+      // when an admin has actually turned it off (defaults to allowed).
+      const settings = await getSettings();
+      if (settings.allowGuestBooking === false) {
+        return next(forbidden('Please log in or create an account to book.'));
+      }
       guestInfo = req.body.guestInfo;
     } else {
       return next(forbidden('Log in or provide guest contact details to book.'));

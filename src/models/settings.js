@@ -66,6 +66,14 @@ export const settingsJsonSchema = {
       // (see services/remindersService.js). Not in `required` for forward-compat with
       // documents predating this field; DEFAULT_SETTINGS always sets it.
       reminderHoursBefore: { bsonType: 'int', minimum: 1 },
+      // Whether the public booking wizard accepts a guest checkout (name/email/phone, no
+      // account) or requires signing in/registering first — enforced server-side in
+      // routes/appointments.js, not just hidden in the UI. Defaults to true (the existing
+      // behavior) so this is opt-out, not a breaking change for an existing deployment.
+      // Never restricts an admin creating a guest booking on a client's behalf (e.g. a
+      // phone booking) — only the public, unauthenticated checkout path. Not in `required`
+      // for forward-compat with documents predating this field; DEFAULT_SETTINGS sets it.
+      allowGuestBooking: { bsonType: 'bool' },
       lateArrival: {
         bsonType: 'object',
         required: ['graceMinutes', 'feeCents'],
@@ -163,6 +171,7 @@ export const DEFAULT_SETTINGS = {
   cancellationNoticeHours: 24,
   rescheduleLockoutHours: 12,
   reminderHoursBefore: 24,
+  allowGuestBooking: true,
   lateArrival: { graceMinutes: 15, feeCents: 5000 },
   // PLACEHOLDER loyalty policy — reference values from §4.5: 1 point per R1 spent,
   // 100 points = R10 (10c/point), 100-point minimum redemption, capped at 50% of a

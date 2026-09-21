@@ -3,6 +3,7 @@ import { clientNotificationsCollection } from '../models/clientNotifications.js'
 import { usersCollection } from '../models/users.js';
 import { notFound } from '../utils/AppError.js';
 import { sortByCreatedAtDesc } from '../utils/sorting.js';
+import { sendMail } from '../config/mailer.js';
 import { ROLES } from '../config/constants.js';
 
 export async function createClientNotification({ userId, type, title, body, link = null }) {
@@ -62,13 +63,28 @@ export async function deleteNotification(notificationId, userId) {
 }
 
 // §4.11 — admin broadcast to every client, via the real in-app compose form (routes/admin.js),
-// not a chain of prompt() dialogs. One insertMany rather than an await-per-customer loop (§6.3).
+// not a chain of prompt() dialogs. One insertMany rather than an await-per-customer loop (§6.3)
+// for the in-app side; email still has to go one-per-recipient (no bulk endpoint), but
+// sendMail() already logs-and-continues on a single failed address rather than throwing,
+// so one bad email can't stop the rest of the broadcast or the in-app notifications above.
 export async function broadcastNotification({ title, body, link = null }) {
   const customers = await (await usersCollection().find({ role: ROLES.CUSTOMER, isActive: true })).toArray();
   if (customers.length === 0) return { sentCount: 0 };
   const now = new Date();
   await clientNotificationsCollection().insertMany(
     customers.map((c) => ({ userId: c._id, type: 'broadcast', title, body, link, isRead: false, createdAt: now }))
+  );
+  await Promise.all(
+    customers
+      .filter((c) => c.email)
+      .map((c) =>
+        sendMail({
+          to: c.email,
+          subject: title,
+          html: `<p><strong>${title}</strong></p><p>${body.replace(/\n/g, '<br>')}</p>`,
+          text: body,
+        })
+      )
   );
   return { sentCount: customers.length };
 }

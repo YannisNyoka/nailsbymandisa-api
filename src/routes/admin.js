@@ -8,6 +8,7 @@ import { validate } from '../middleware/validate.js';
 import { authenticate, requirePermission, requirePermissionOrStaffSelf } from '../middleware/auth.js';
 import { messagingLimiter } from '../middleware/rateLimit.js';
 import { sendSms } from '../config/smsClient.js';
+import { sendMail } from '../config/mailer.js';
 import { PERMISSIONS, PAGINATION, ROLES } from '../config/constants.js';
 import { badRequest, notFound } from '../utils/AppError.js';
 import { usersCollection } from '../models/users.js';
@@ -133,6 +134,15 @@ router.post(
 
       if (alsoSms && target.phone) {
         await sendSms({ to: target.phone, body: `${title}: ${body}` });
+      }
+
+      if (target.email) {
+        await sendMail({
+          to: target.email,
+          subject: title,
+          html: `<p><strong>${title}</strong></p><p>${body.replace(/\n/g, '<br>')}</p>`,
+          text: body,
+        });
       }
 
       await clientNotificationsService.createClientNotification({ userId, type: 'admin_message', title, body, link });

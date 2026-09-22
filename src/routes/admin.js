@@ -41,6 +41,24 @@ router.get('/trends', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), 
   }
 });
 
+const businessSummaryQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).default(30),
+});
+
+router.get(
+  '/analytics/summary',
+  requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS),
+  validate(businessSummaryQuerySchema, 'query'),
+  async (req, res, next) => {
+    try {
+      const employeeId = req.user.role === ROLES.STAFF ? req.user.employeeId : undefined;
+      res.json(await adminService.getBusinessSummary({ ...req.query, employeeId }));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 const topServicesQuerySchema = z.object({
   days: z.coerce.number().int().min(1).max(365).default(30),
   limit: z.coerce.number().int().min(1).max(50).default(8),

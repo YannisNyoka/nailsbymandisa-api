@@ -199,6 +199,66 @@ describe('GET /api/admin/trends', () => {
   });
 });
 
+describe('GET /api/admin/analytics/summary', () => {
+  it('windows revenue, bookings and new clients to the requested range', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService({ priceCents: 20000 });
+    const employee = await createTestEmployee();
+    const today = todayDateString();
+
+    const inWindow = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    await appointmentsCollection().updateOne({ _id: inWindow._id }, { $set: { date: today } });
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: inWindow._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: { createCheckout: async () => ({ id: 'c1', redirectUrl: 'https://x' }) },
+    });
+    await paymentsService.handlePaymentSucceeded({ paymentId: payment._id, yocoPaymentId: 'pay_1' });
+
+    // Outside the 7-day window being requested below — must not count toward it.
+    const outsideWindow = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '11:00',
+    });
+    await appointmentsCollection().updateOne({ _id: outsideWindow._id }, { $set: { date: '2000-01-01' } });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/analytics/summary?days=7').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.bookingsInWindow).toBe(1);
+    expect(res.body.bookingsToday).toBe(1);
+    expect(res.body.combinedRevenueCents).toBe(payment.amountCents);
+    expect(res.body.revenueBreakdown.bookingDepositCents).toBe(payment.amountCents);
+    expect(res.body.newClientsInWindow).toBe(1);
+    expect(res.body.totalClients).toBe(1);
+  });
+
+  it("only counts a staff account's own bookings, and hides salon-wide client/loyalty figures", async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService();
+    const myEmployee = await createTestEmployee();
+    const otherEmployee = await createTestEmployee();
+    const today = todayDateString();
+
+    const mine = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(myEmployee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    await appointmentsCollection().updateOne({ _id: mine._id }, { $set: { date: today } });
+    const theirs = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(otherEmployee._id), serviceIds: [String(service._id)], date: DATE, startTime: '10:00',
+    });
+    await appointmentsCollection().updateOne({ _id: theirs._id }, { $set: { date: today } });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
+    const res = await request(app).get('/api/admin/analytics/summary?days=7').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.bookingsInWindow).toBe(1);
+    expect(res.body.totalClients).toBeNull();
+    expect(res.body.loyaltyMemberCount).toBeNull();
+  });
+});
+
 describe('GET /api/admin/analytics/top-services', () => {
   it('ranks services by non-cancelled bookings in the window, excluding cancelled ones', async () => {
     const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });

@@ -109,6 +109,81 @@ export async function getOverviewStats({ employeeId } = {}) {
   };
 }
 
+// Dedicated "Business Analytics" page (a single adjustable date range driving every
+// figure at once, matching how the salon owner asked for it) — getOverviewStats above
+// stays fixed-window (today/week/month) for the always-visible dashboard glance, this is
+// the deliberately re-windowable counterpart everything on that page is built from.
+export async function getBusinessSummary({ days = 30, employeeId } = {}) {
+  const today = todayDateString();
+  const dateStrings = new Set(lastNDateStrings(days));
+  const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
+  const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
+
+  const [appointments, allPayments, customers, loyaltyAccounts] = await Promise.all([
+    (await appointmentsCollection().find(appointmentsFilter)).toArray(),
+    (await paymentsCollection().find({})).toArray(),
+    employeeObjectId ? Promise.resolve(null) : (await usersCollection().find({ role: ROLES.CUSTOMER })).toArray(),
+    employeeObjectId ? Promise.resolve(null) : (await loyaltyAccountsCollection().find({})).toArray(),
+  ]);
+
+  const appointmentIds = new Set(appointments.map((a) => String(a._id)));
+  const payments = employeeObjectId
+    ? allPayments.filter((p) => p.appointmentId && appointmentIds.has(String(p.appointmentId)))
+    : allPayments;
+  const paidPayments = payments.filter((p) => PAID_STATUSES.includes(p.status));
+  const paidInWindow = paidPayments.filter((p) => dateStrings.has(dateStringFor(p.createdAt)));
+  const combinedRevenueCents = paidInWindow.reduce((sum, p) => sum + netCents(p), 0);
+
+  const inWindow = appointments.filter((a) => dateStrings.has(a.date));
+  const bookingsToday = appointments.filter(
+    (a) => a.date === today && [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED].includes(a.status)
+  ).length;
+  const bookingsInWindow = inWindow.filter((a) => a.status !== APPOINTMENT_STATUS.CANCELLED).length;
+  const completedCount = inWindow.filter((a) => a.status === APPOINTMENT_STATUS.COMPLETED).length;
+  const cancelledCount = inWindow.filter((a) => a.status === APPOINTMENT_STATUS.CANCELLED).length;
+  const noShowsCount = inWindow.filter((a) => a.status === APPOINTMENT_STATUS.NO_SHOW).length;
+  const upcomingCount = inWindow.filter((a) =>
+    [APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED].includes(a.status)
+  ).length;
+  const finishedCount = completedCount + cancelledCount + noShowsCount;
+  const completionRate = finishedCount > 0 ? Math.round((completedCount / finishedCount) * 100) : null;
+
+  const revenueBreakdown = {
+    bookingDepositCents: paidInWindow
+      .filter((p) => p.purpose === PAYMENT_PURPOSE.BOOKING_DEPOSIT)
+      .reduce((sum, p) => sum + netCents(p), 0),
+    giftCardPurchaseCents: paidInWindow
+      .filter((p) => p.purpose === PAYMENT_PURPOSE.GIFT_CARD_PURCHASE)
+      .reduce((sum, p) => sum + netCents(p), 0),
+  };
+
+  const totalClients = customers?.length ?? null;
+  const newClientsInWindow = customers
+    ? customers.filter((c) => dateStrings.has(dateStringFor(c.createdAt))).length
+    : null;
+  const loyaltyMemberCount = loyaltyAccounts?.length ?? null;
+  const avgLoyaltyPoints = loyaltyAccounts?.length
+    ? Math.round(loyaltyAccounts.reduce((sum, a) => sum + a.pointsBalance, 0) / loyaltyAccounts.length)
+    : null;
+
+  return {
+    days,
+    combinedRevenueCents,
+    revenueBreakdown,
+    bookingsToday,
+    bookingsInWindow,
+    completedCount,
+    cancelledCount,
+    noShowsCount,
+    upcomingCount,
+    completionRate,
+    totalClients,
+    newClientsInWindow,
+    loyaltyMemberCount,
+    avgLoyaltyPoints,
+  };
+}
+
 // §SEO-analytics-followup — "which services/staff/clients actually drive the business,"
 // not just aggregate totals. All three below share the same non-cancelled-bookings
 // window as the trend charts (lastNDateStrings), full-scan-then-reduce like everything

@@ -74,6 +74,13 @@ export const settingsJsonSchema = {
       // phone booking) — only the public, unauthenticated checkout path. Not in `required`
       // for forward-compat with documents predating this field; DEFAULT_SETTINGS sets it.
       allowGuestBooking: { bsonType: 'bool' },
+      // Admin-controlled booking window: 'YYYY-MM' month keys that are closed to new
+      // bookings, checked in bookingService.js's evaluateSlot() (the single shared
+      // slot-validation rule) so it's enforced on every booking-creation path, not just
+      // hidden in the UI. Absent/empty means every month is open — the existing behavior,
+      // so this is opt-in, not a breaking change. Not in `required` for forward-compat
+      // with documents predating this field; DEFAULT_SETTINGS always sets it to [].
+      lockedMonths: { bsonType: 'array', items: { bsonType: 'string', pattern: '^\\d{4}-\\d{2}$' } },
       lateArrival: {
         bsonType: 'object',
         required: ['graceMinutes', 'feeCents'],
@@ -172,6 +179,7 @@ export const DEFAULT_SETTINGS = {
   rescheduleLockoutHours: 12,
   reminderHoursBefore: 24,
   allowGuestBooking: true,
+  lockedMonths: [],
   lateArrival: { graceMinutes: 15, feeCents: 5000 },
   // PLACEHOLDER loyalty policy — reference values from §4.5: 1 point per R1 spent,
   // 100 points = R10 (10c/point), 100-point minimum redemption, capped at 50% of a

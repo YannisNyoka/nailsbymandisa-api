@@ -40,6 +40,7 @@ const updateSettingsSchema = z
     rescheduleLockoutHours: z.number().int().min(0),
     reminderHoursBefore: z.number().int().min(1),
     allowGuestBooking: z.boolean(),
+    lockedMonths: z.array(z.string().regex(/^\d{4}-\d{2}$/, 'Expected YYYY-MM')).max(60),
     lateArrival: z.object({
       graceMinutes: z.number().int().min(0),
       feeCents: z.number().int().min(0),

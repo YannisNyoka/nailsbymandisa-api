@@ -72,6 +72,38 @@ describe('settings', () => {
     expect(res.status).toBe(400);
   });
 
+  it('lets an admin lock and re-open calendar months', async () => {
+    const { accessToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_SETTINGS],
+    });
+    const locked = await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ lockedMonths: ['2026-11', '2026-12'] });
+    expect(locked.status).toBe(200);
+    expect(locked.body.settings.lockedMonths).toEqual(['2026-11', '2026-12']);
+
+    const reopened = await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ lockedMonths: ['2026-12'] });
+    expect(reopened.status).toBe(200);
+    expect(reopened.body.settings.lockedMonths).toEqual(['2026-12']);
+  });
+
+  it('rejects a lockedMonths entry that is not a YYYY-MM string', async () => {
+    const { accessToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_SETTINGS],
+    });
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ lockedMonths: ['November 2026'] });
+    expect(res.status).toBe(400);
+  });
+
   it('rejects an empty heroMediaItems array', async () => {
     const { accessToken } = await createUserAndToken({
       role: ROLES.ADMIN,

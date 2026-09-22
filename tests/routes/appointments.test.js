@@ -85,6 +85,59 @@ describe('POST /api/appointments', () => {
     expect(asAdmin.status).toBe(201);
   });
 
+  it('rejects any new booking — guest, customer or admin-created — once the admin locks that month', async () => {
+    const { accessToken: adminToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_SETTINGS],
+    });
+    await request(app)
+      .patch('/api/settings')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ lockedMonths: [DATE.slice(0, 7)] });
+
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    const asGuest = await request(app)
+      .post('/api/appointments')
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+        employeeId: String(employee._id),
+        guestInfo: { name: 'Guest', email: 'guest@example.com', phone: '0821234567' },
+      });
+    expect(asGuest.status).toBe(409);
+
+    const { accessToken: customerToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const asCustomer = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .send({ serviceIds: [String(service._id)], date: DATE, startTime: '10:00', employeeId: String(employee._id) });
+    expect(asCustomer.status).toBe(409);
+
+    // Same absolute rule an admin-blocked slot already gets (§ availability blocks) — a
+    // locked month is a salon-wide policy, not something worked around per-booking.
+    const asAdmin = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '11:00',
+        employeeId: String(employee._id),
+        guestInfo: { name: 'Phone Client', email: 'phone-client@example.com', phone: '0821234567' },
+      });
+    expect(asAdmin.status).toBe(409);
+
+    // GET /appointments/slots reflects the same policy — nothing to pick from.
+    const slotsRes = await request(app).get(
+      `/api/appointments/slots?serviceIds=${service._id}&date=${DATE}&employeeId=${employee._id}`
+    );
+    expect(slotsRes.status).toBe(200);
+    expect(slotsRes.body.slots).toEqual([]);
+  });
+
   it('never trusts a client-submitted price — only serviceIds/date/time are accepted', async () => {
     const service = await createTestService({ priceCents: 30000 });
     const employee = await createTestEmployee();

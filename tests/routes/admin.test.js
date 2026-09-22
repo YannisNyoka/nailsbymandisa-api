@@ -206,16 +206,20 @@ describe('GET /api/admin/analytics/summary', () => {
     const employee = await createTestEmployee();
     const today = todayDateString();
 
+    // Pay while the appointment is still safely in the future — paymentsService
+    // re-validates the slot isn't in the past right before charging, which a same-day
+    // 09:00 appointment could already fail depending on what time of day the suite runs.
+    // Backdate to today only afterward, once that live re-check is behind us.
     const inWindow = await bookingService.createAppointment({
       userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
     });
-    await appointmentsCollection().updateOne({ _id: inWindow._id }, { $set: { date: today } });
     const payment = await paymentsService.initiateBookingDepositPayment({
       appointmentId: inWindow._id,
       actor: { _id: userId, role: ROLES.CUSTOMER },
       yoco: { createCheckout: async () => ({ id: 'c1', redirectUrl: 'https://x' }) },
     });
     await paymentsService.handlePaymentSucceeded({ paymentId: payment._id, yocoPaymentId: 'pay_1' });
+    await appointmentsCollection().updateOne({ _id: inWindow._id }, { $set: { date: today } });
 
     // Outside the 7-day window being requested below — must not count toward it.
     const outsideWindow = await bookingService.createAppointment({

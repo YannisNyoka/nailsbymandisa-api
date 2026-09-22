@@ -43,7 +43,15 @@ const SLOT_BLOCKING_STATUSES = [APPOINTMENT_STATUS.CONFIRMED];
 // rule, just fed pre-fetched data instead of querying per candidate. Do not duplicate
 // this logic — extend evaluateSlot() if the rule itself needs to change.
 // ============================================================================
-function evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId }) {
+function evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId, lockedMonths }) {
+  // Admin-controlled booking window (§ lock/open calendar months) — checked first since
+  // it's a cheap string comparison with no DB round-trip, before anything employee/
+  // schedule-specific. `date` is already a 'YYYY-MM-DD' string, so its first 7 chars are
+  // the 'YYYY-MM' month key lockedMonths stores.
+  if (lockedMonths?.has(date.slice(0, 7))) {
+    return { bookable: false, reason: 'Bookings for this month are currently closed.' };
+  }
+
   if (!employee || !employee.isActive) {
     return { bookable: false, reason: 'This staff member is not available for booking.' };
   }
@@ -82,12 +90,14 @@ function evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appoin
 // Single-slot check: fetches just what evaluateSlot() needs for one (employee, date)
 // pair — one query for the day's blocks, one for the day's appointments (§6.3).
 export async function checkSlotBookable({ employeeId, date, startTime, endTime, excludeAppointmentId }) {
-  const employee = await employeesCollection().findOne({ _id: new ObjectId(employeeId) });
-  const [blocksForDay, appointmentsForDay] = await Promise.all([
+  const [employee, blocksForDay, appointmentsForDay, settings] = await Promise.all([
+    employeesCollection().findOne({ _id: new ObjectId(employeeId) }),
     (await availabilityCollection().find({ date })).toArray(),
     (await appointmentsCollection().find({ employeeId: new ObjectId(employeeId), date })).toArray(),
+    getSettings(),
   ]);
-  return evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId });
+  const lockedMonths = new Set(settings.lockedMonths);
+  return evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId, lockedMonths });
 }
 
 // Shared cancel-and-notify for a pending_payment appointment that's no longer going
@@ -384,6 +394,10 @@ export async function cancelAppointment({ appointmentId, actor, reason }) {
 export async function listAvailableSlots({ serviceIds, date, employeeId }) {
   const quote = await quoteBooking({ serviceIds, date, startTime: '00:00' });
   const durationMinutes = quote.totalDurationMinutes;
+
+  const settings = await getSettings();
+  const lockedMonths = new Set(settings.lockedMonths);
+  if (lockedMonths.has(date.slice(0, 7))) return [];
 
   const employees =
     employeeId && employeeId !== ANY_AVAILABLE_EMPLOYEE

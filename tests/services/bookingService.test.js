@@ -2,6 +2,7 @@ import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
 import { createTestService, createTestEmployee, futureDateString } from '../helpers/fixtures.js';
 import * as bookingService from '../../src/services/bookingService.js';
+import * as settingsService from '../../src/services/settingsService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { availabilityCollection } from '../../src/models/availability.js';
 import { ROLES } from '../../src/config/constants.js';
@@ -180,6 +181,37 @@ describe('bookingService.createAppointment — the shared slot-validation path',
         startTime: '10:00',
       })
     ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('rejects booking into a month the admin has locked, even with a free slot', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+    await settingsService.updateSettings({ lockedMonths: [DATE.slice(0, 7)] });
+
+    await expect(
+      bookingService.createAppointment({
+        userId: String(new ObjectId()),
+        employeeId: String(employee._id),
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it('allows booking again once the admin re-opens the month', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+    await settingsService.updateSettings({ lockedMonths: ['2000-01'] }); // some other month, not DATE's
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    expect(appointment.date).toBe(DATE);
   });
 
   it('"any available" resolves to a free employee when the first choice is already confirmed elsewhere', async () => {
@@ -476,6 +508,19 @@ describe('bookingService.listAvailableSlots', () => {
       employeeId: String(employee._id),
     });
     expect(slots).toContain('10:00');
+  });
+
+  it('returns no slots at all for a date whose month the admin has locked', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+    await settingsService.updateSettings({ lockedMonths: [DATE.slice(0, 7)] });
+
+    const slots = await bookingService.listAvailableSlots({
+      serviceIds: [String(service._id)],
+      date: DATE,
+      employeeId: String(employee._id),
+    });
+    expect(slots).toEqual([]);
   });
 
   it('excludes a slot once it is confirmed (paid) and reflects it again once cancelled', async () => {

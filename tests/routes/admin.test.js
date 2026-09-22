@@ -6,6 +6,7 @@ import { createTestService, createTestEmployee, futureDateString } from '../help
 import { createUserAndToken } from '../helpers/testAuth.js';
 import * as bookingService from '../../src/services/bookingService.js';
 import * as paymentsService from '../../src/services/paymentsService.js';
+import * as loyaltyService from '../../src/services/loyaltyService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { usersCollection, usersIndexes } from '../../src/models/users.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
@@ -61,7 +62,45 @@ describe('GET /api/admin/overview', () => {
     expect(res.body.revenueTodayCents).toBe(payment.amountCents);
     expect(res.body.revenueWeekCents).toBe(payment.amountCents);
     expect(res.body.revenueMonthCents).toBe(payment.amountCents);
+    expect(res.body.revenueBreakdown.bookingDepositCents).toBe(payment.amountCents);
+    expect(res.body.revenueBreakdown.giftCardPurchaseCents).toBe(0);
+    expect(res.body.avgBookingValueCents).toBe(payment.amountCents);
     expect(res.body.recentActivity.length).toBeGreaterThan(0);
+  });
+
+  it('computes a completion rate from finished bookings only, ignoring ones still upcoming', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const completed = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    await appointmentsCollection().updateOne({ _id: completed._id }, { $set: { status: 'completed' } });
+    const cancelled = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '11:00',
+    });
+    await appointmentsCollection().updateOne({ _id: cancelled._id }, { $set: { status: 'cancelled' } });
+    // Still upcoming/unresolved — must not count toward the rate's denominator either way.
+    await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '13:00',
+    });
+
+    const { accessToken: adminToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.body.completedCount).toBe(1);
+    expect(res.body.completionRate).toBe(50);
+  });
+
+  it('reports loyalty membership across the whole client base', async () => {
+    const { userId: user1 } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const { userId: user2 } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    await loyaltyService.awardPoints({ userId: user1, points: 100, source: 'booking_deposit_payment' });
+    await loyaltyService.awardPoints({ userId: user2, points: 40, source: 'booking_deposit_payment' });
+
+    const { accessToken: adminToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.body.loyaltyMemberCount).toBe(2);
+    expect(res.body.avgLoyaltyPoints).toBe(70);
   });
 
   it('counts cancellations and no-shows separately from active bookings', async () => {
@@ -157,6 +196,102 @@ describe('GET /api/admin/trends', () => {
     expect(res.body.points).toHaveLength(365);
     const dayWithBooking = res.body.points.find((p) => p.date === today);
     expect(dayWithBooking.booked).toBe(1);
+  });
+});
+
+describe('GET /api/admin/analytics/top-services', () => {
+  it('ranks services by non-cancelled bookings in the window, excluding cancelled ones', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const employee = await createTestEmployee();
+    const popular = await createTestService({ name: 'Gel Manicure' });
+    const rare = await createTestService({ name: 'Nail Art' });
+
+    const today = todayDateString();
+    for (const [service, time] of [[popular, '09:00'], [popular, '10:00'], [rare, '11:00']]) {
+      // eslint-disable-next-line no-await-in-loop -- small fixed list, sequential is clearer here
+      const appt = await bookingService.createAppointment({
+        userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: time,
+      });
+      // eslint-disable-next-line no-await-in-loop
+      await appointmentsCollection().updateOne({ _id: appt._id }, { $set: { date: today } });
+    }
+    const cancelledOne = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(popular._id)], date: DATE, startTime: '13:00',
+    });
+    await appointmentsCollection().updateOne({ _id: cancelledOne._id }, { $set: { date: today, status: 'cancelled' } });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/analytics/top-services?days=30').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.items[0]).toEqual({ serviceId: String(popular._id), name: 'Gel Manicure', count: 2 });
+    expect(res.body.items[1]).toEqual({ serviceId: String(rare._id), name: 'Nail Art', count: 1 });
+  });
+});
+
+describe('GET /api/admin/analytics/staff-bookings', () => {
+  it('is admin-only, never available to a staff account', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: (await createTestEmployee())._id });
+    const res = await request(app).get('/api/admin/analytics/staff-bookings').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('ranks staff by non-cancelled bookings', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService();
+    const busy = await createTestEmployee({ name: 'Noxolo' });
+    const quiet = await createTestEmployee({ name: 'Naledi' });
+    const today = todayDateString();
+
+    const a1 = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(busy._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    await appointmentsCollection().updateOne({ _id: a1._id }, { $set: { date: today } });
+    const a2 = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(quiet._id), serviceIds: [String(service._id)], date: DATE, startTime: '10:00',
+    });
+    await appointmentsCollection().updateOne({ _id: a2._id }, { $set: { date: today } });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/analytics/staff-bookings').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toEqual(
+      expect.arrayContaining([
+        { employeeId: String(busy._id), name: 'Noxolo', count: 1 },
+        { employeeId: String(quiet._id), name: 'Naledi', count: 1 },
+      ])
+    );
+  });
+});
+
+describe('GET /api/admin/analytics/top-clients', () => {
+  it('is admin-only, never available to a staff account', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: (await createTestEmployee())._id });
+    const res = await request(app).get('/api/admin/analytics/top-clients').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('ranks clients by booking count, excluding guest bookings entirely', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const user = await usersCollection().findOne({ _id: userId });
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '10:00',
+    });
+    await bookingService.createAppointment({
+      userId: null,
+      guestInfo: { firstName: 'Guest', lastName: 'Person', email: 'guest@example.com', phone: '0820000000' },
+      employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '11:00',
+    });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/analytics/top-clients').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0]).toMatchObject({ userId: String(userId), email: user.email, bookingsCount: 2 });
   });
 });
 

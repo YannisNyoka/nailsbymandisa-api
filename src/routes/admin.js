@@ -41,6 +41,62 @@ router.get('/trends', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), 
   }
 });
 
+const topServicesQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).default(30),
+  limit: z.coerce.number().int().min(1).max(50).default(8),
+});
+
+router.get(
+  '/analytics/top-services',
+  requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS),
+  validate(topServicesQuerySchema, 'query'),
+  async (req, res, next) => {
+    try {
+      const employeeId = req.user.role === ROLES.STAFF ? req.user.employeeId : undefined;
+      res.json(await adminService.getTopServices({ ...req.query, employeeId }));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+const staffBookingsQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(365).default(30),
+});
+
+// Admin-only (not requirePermissionOrStaffSelf) — this ranks every staff member against
+// each other, exactly the cross-staff visibility a staff account must never get.
+router.get(
+  '/analytics/staff-bookings',
+  requirePermission(PERMISSIONS.VIEW_ANALYTICS),
+  validate(staffBookingsQuerySchema, 'query'),
+  async (req, res, next) => {
+    try {
+      res.json(await adminService.getStaffBookingsBreakdown(req.query));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+const topClientsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(5),
+});
+
+// Admin-only — ranks the whole client base, not one staff member's own clients.
+router.get(
+  '/analytics/top-clients',
+  requirePermission(PERMISSIONS.VIEW_ANALYTICS),
+  validate(topClientsQuerySchema, 'query'),
+  async (req, res, next) => {
+    try {
+      res.json(await adminService.getTopClients(req.query));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(PAGINATION.MAX_LIMIT).default(PAGINATION.DEFAULT_LIMIT),

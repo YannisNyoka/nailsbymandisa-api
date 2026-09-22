@@ -2,8 +2,10 @@ import { ObjectId } from 'mongodb';
 import { appointmentsCollection } from '../models/appointments.js';
 import { paymentsCollection } from '../models/payments.js';
 import { loyaltyAccountsCollection } from '../models/loyaltyAccounts.js';
+import { servicesCollection } from '../models/services.js';
+import { employeesCollection } from '../models/employees.js';
 import { usersCollection, toPublicUser } from '../models/users.js';
-import { ROLES, APPOINTMENT_STATUS, PAYMENT_STATUS, PAGINATION } from '../config/constants.js';
+import { ROLES, APPOINTMENT_STATUS, PAYMENT_STATUS, PAYMENT_PURPOSE, PAGINATION } from '../config/constants.js';
 import { todayDateString, dateStringFor, lastNDateStrings } from '../utils/businessTime.js';
 import { badRequest, notFound } from '../utils/AppError.js';
 import { sortByCreatedAtDesc } from '../utils/sorting.js';
@@ -24,11 +26,13 @@ export async function getOverviewStats({ employeeId } = {}) {
   const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
   const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
 
-  const [appointments, allPayments, clientCount, recentActivity] = await Promise.all([
+  const [appointments, allPayments, clientCount, recentActivity, loyaltyAccounts] = await Promise.all([
     (await appointmentsCollection().find(appointmentsFilter)).toArray(),
     (await paymentsCollection().find({})).toArray(),
     employeeObjectId ? Promise.resolve(null) : (await usersCollection().find({ role: ROLES.CUSTOMER })).toArray().then((u) => u.length),
     employeeObjectId ? Promise.resolve({ entries: [] }) : listActivity({ page: 1, pageSize: 10 }),
+    // Salon-wide membership data, not meaningful scoped to one staff member's own clients.
+    employeeObjectId ? Promise.resolve(null) : (await loyaltyAccountsCollection().find({})).toArray(),
   ]);
 
   // A staff member's revenue only counts payments tied to their own appointments — join
@@ -59,6 +63,29 @@ export async function getOverviewStats({ employeeId } = {}) {
 
   const cancellationsCount = appointments.filter((a) => a.status === APPOINTMENT_STATUS.CANCELLED).length;
   const noShowsCount = appointments.filter((a) => a.status === APPOINTMENT_STATUS.NO_SHOW).length;
+  const completedCount = appointments.filter((a) => a.status === APPOINTMENT_STATUS.COMPLETED).length;
+
+  // Out of every booking that actually reached a final outcome (completed, cancelled or
+  // a no-show) — still-pending/upcoming ones aren't a "miss" yet, so they're excluded
+  // rather than silently dragging the rate down while they're still on the calendar.
+  const finishedCount = completedCount + cancellationsCount + noShowsCount;
+  const completionRate = finishedCount > 0 ? Math.round((completedCount / finishedCount) * 100) : null;
+
+  const avgBookingValueCents = paidPayments.length > 0 ? Math.round(netRevenueCents / paidPayments.length) : 0;
+
+  const revenueBreakdown = {
+    bookingDepositCents: paidPayments
+      .filter((p) => p.purpose === PAYMENT_PURPOSE.BOOKING_DEPOSIT)
+      .reduce((sum, p) => sum + netCents(p), 0),
+    giftCardPurchaseCents: paidPayments
+      .filter((p) => p.purpose === PAYMENT_PURPOSE.GIFT_CARD_PURCHASE)
+      .reduce((sum, p) => sum + netCents(p), 0),
+  };
+
+  const loyaltyMemberCount = loyaltyAccounts?.length ?? null;
+  const avgLoyaltyPoints = loyaltyAccounts?.length
+    ? Math.round(loyaltyAccounts.reduce((sum, a) => sum + a.pointsBalance, 0) / loyaltyAccounts.length)
+    : null;
 
   return {
     appointmentsToday,
@@ -70,10 +97,102 @@ export async function getOverviewStats({ employeeId } = {}) {
     revenueTodayCents: revenueInWindow(last1),
     revenueWeekCents: revenueInWindow(last7),
     revenueMonthCents: revenueInWindow(last30),
+    revenueBreakdown,
+    avgBookingValueCents,
     cancellationsCount,
     noShowsCount,
+    completedCount,
+    completionRate,
+    loyaltyMemberCount,
+    avgLoyaltyPoints,
     recentActivity: recentActivity.entries,
   };
+}
+
+// §SEO-analytics-followup — "which services/staff/clients actually drive the business,"
+// not just aggregate totals. All three below share the same non-cancelled-bookings
+// window as the trend charts (lastNDateStrings), full-scan-then-reduce like everything
+// else in this file.
+export async function getTopServices({ days = 30, limit = 8, employeeId } = {}) {
+  const dateStrings = new Set(lastNDateStrings(days));
+  const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
+  const filter = employeeObjectId ? { employeeId: employeeObjectId } : {};
+
+  const [appointments, services] = await Promise.all([
+    (await appointmentsCollection().find(filter)).toArray(),
+    (await servicesCollection().find({})).toArray(),
+  ]);
+  const serviceById = new Map(services.map((s) => [String(s._id), s.name]));
+
+  const counts = new Map();
+  for (const a of appointments) {
+    if (a.status === APPOINTMENT_STATUS.CANCELLED || !dateStrings.has(a.date)) continue;
+    for (const serviceId of a.serviceIds) {
+      const key = String(serviceId);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+
+  const items = [...counts.entries()]
+    .map(([serviceId, count]) => ({ serviceId, name: serviceById.get(serviceId) || 'Deleted service', count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit);
+
+  return { days, items };
+}
+
+// Admin-only (never staff-scoped) — comparing headcount across staff is exactly the
+// cross-staff visibility a staff account must never get (§ staff-scoped admin access).
+export async function getStaffBookingsBreakdown({ days = 30 } = {}) {
+  const dateStrings = new Set(lastNDateStrings(days));
+  const [appointments, employees] = await Promise.all([
+    (await appointmentsCollection().find({})).toArray(),
+    (await employeesCollection().find({})).toArray(),
+  ]);
+  const employeeById = new Map(employees.map((e) => [String(e._id), e.name]));
+
+  const counts = new Map();
+  for (const a of appointments) {
+    if (a.status === APPOINTMENT_STATUS.CANCELLED || !dateStrings.has(a.date)) continue;
+    const key = String(a.employeeId);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const items = [...counts.entries()]
+    .map(([employeeId, count]) => ({ employeeId, name: employeeById.get(employeeId) || 'Former staff member', count }))
+    .sort((a, b) => b.count - a.count);
+
+  return { days, items };
+}
+
+// Admin-only — ranks the whole client base, not one staff member's own clients.
+export async function getTopClients({ limit = 5 } = {}) {
+  const appointments = await (await appointmentsCollection().find({})).toArray();
+  const counts = new Map();
+  for (const a of appointments) {
+    if (!a.userId) continue;
+    const key = String(a.userId);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const topIds = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id]) => id);
+  if (topIds.length === 0) return { items: [] };
+
+  const users = await (await usersCollection().find({ _id: { $in: topIds.map((id) => new ObjectId(id)) } })).toArray();
+  const userById = new Map(users.map((u) => [String(u._id), u]));
+
+  const items = topIds
+    .map((id) => {
+      const user = userById.get(id);
+      if (!user) return null;
+      return { userId: id, firstName: user.firstName, lastName: user.lastName, email: user.email, bookingsCount: counts.get(id) };
+    })
+    .filter(Boolean);
+
+  return { items };
 }
 
 const TREND_METRICS = new Set(['revenue', 'bookings']);

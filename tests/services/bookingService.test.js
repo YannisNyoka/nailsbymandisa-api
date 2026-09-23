@@ -53,6 +53,23 @@ describe('bookingService.quoteBooking', () => {
       bookingService.quoteBooking({ serviceIds: [String(service._id)], startTime: '10:00' })
     ).rejects.toMatchObject({ statusCode: 400 });
   });
+
+  it('rejects a booking whose computed end time would wrap past midnight', async () => {
+    // Every downstream working-hours/overlap check compares HH:MM as plain strings,
+    // which only orders correctly within a single calendar day — silently letting this
+    // through would corrupt those comparisons (a wrapped "00:20" endTime would lexically
+    // look earlier than everything, passing checks it should fail).
+    const service = await createTestService({ durationMinutes: 90 });
+    await expect(
+      bookingService.quoteBooking({ serviceIds: [String(service._id)], startTime: '23:00' })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it('allows a booking that ends exactly at midnight boundary minus one minute', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const quote = await bookingService.quoteBooking({ serviceIds: [String(service._id)], startTime: '22:59' });
+    expect(quote.endTime).toBe('23:59');
+  });
 });
 
 describe('bookingService.createAppointment — the shared slot-validation path', () => {

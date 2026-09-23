@@ -8,7 +8,7 @@ import { validate } from '../middleware/validate.js';
 import { authenticate, optionalAuthenticate, requirePermissionOrStaffSelf } from '../middleware/auth.js';
 import { checkoutLimiter } from '../middleware/rateLimit.js';
 import { PERMISSIONS, ROLES, PAGINATION, ANY_AVAILABLE_EMPLOYEE } from '../config/constants.js';
-import { forbidden } from '../utils/AppError.js';
+import { badRequest, forbidden } from '../utils/AppError.js';
 import { ObjectId } from 'mongodb';
 
 export const router = Router();
@@ -63,6 +63,12 @@ router.post('/', optionalAuthenticate, checkoutLimiter, validate(createAppointme
     let createdByAdminId = null;
 
     if (isAdmin && req.body.onBehalfOfUserId) {
+      // Admin-trusted input, but never taken on faith — a garbage-but-valid-looking id
+      // would otherwise create an appointment permanently orphaned from any real
+      // customer (invisible in their booking history since it doesn't exist, blank
+      // identity everywhere an admin view resolves userId -> name/email).
+      const targetUser = await usersCollection().findOne({ _id: new ObjectId(req.body.onBehalfOfUserId), role: ROLES.CUSTOMER });
+      if (!targetUser || !targetUser.isActive) throw badRequest('That client account could not be found.');
       userId = req.body.onBehalfOfUserId;
       createdByAdminId = req.user._id;
     } else if (isAdmin && req.body.guestInfo) {

@@ -79,6 +79,23 @@ export async function redeemUpTo({ code, maxAmountCents, appointmentId = null })
   return { valueCents: amountToRedeem };
 }
 
+// Reverses redeemUpTo() — needed when a checkout that already redeemed part of a card
+// fails partway through (Yoco rejecting the checkout), so the balance isn't genuinely
+// gone for a booking that never went through. Records a negative-amount entry in
+// `redemptions` rather than removing the original one, keeping an honest append-only
+// audit trail instead of rewriting history.
+export async function creditBack({ code, amountCents, appointmentId = null }) {
+  if (amountCents <= 0) return;
+  await giftCardsCollection().updateOne(
+    { code: code.toUpperCase() },
+    {
+      $inc: { balanceCents: amountCents },
+      $push: { redemptions: { amountCents: -amountCents, appointmentId: appointmentId ? new ObjectId(appointmentId) : null, createdAt: new Date() } },
+      $set: { updatedAt: new Date() },
+    }
+  );
+}
+
 export async function getGiftCardByCode(code) {
   const card = await giftCardsCollection().findOne({ code: code.toUpperCase() });
   if (!card) throw notFound('Gift card');

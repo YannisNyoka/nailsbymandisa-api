@@ -6,10 +6,11 @@ import * as defaultYoco from '../config/yocoClient.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
 import { checkSlotBookable, cancelUnviableAppointment } from './bookingService.js';
-import { awardPoints, previewRedemption, redeemPoints } from './loyaltyService.js';
+import { timeRangesOverlap } from '../utils/businessTime.js';
+import { awardPoints, previewRedemption, redeemPoints, creditBackPoints } from './loyaltyService.js';
 import { completeReferralIfPending } from './referralService.js';
 import { getSettings } from './settingsService.js';
-import { validateDiscountCode, redeemDiscountCode } from './discountsService.js';
+import { validateDiscountCode, redeemDiscountCode, unredeemDiscountCode } from './discountsService.js';
 import * as giftCardsService from './giftCardsService.js';
 import { sendMail } from '../config/mailer.js';
 import { env } from '../config/env.js';
@@ -34,6 +35,38 @@ export async function getPayment(id) {
   const payment = await paymentsCollection().findOne({ _id: new ObjectId(id) });
   if (!payment) throw notFound('Payment');
   return payment;
+}
+
+// Reverses whatever subset of discount/points/gift-card a checkout attempt actually
+// redeemed, in reverse order, before that attempt's failure is surfaced to the caller.
+// Without this, a checkout that fails partway through (an invalid gift card code after
+// the discount and points already succeeded, or Yoco itself rejecting the checkout)
+// silently keeps the customer's already-spent discount use / real loyalty points / gift
+// card balance gone for a booking that never actually happened — and a resubmission with
+// the same codes would then redeem them a second time on top of that, since nothing here
+// remembers what a previous failed attempt already consumed.
+async function rollbackRedemptions({
+  appointmentId,
+  userId,
+  appliedDiscountCode,
+  pointsRedeemed,
+  appliedGiftCardCode,
+  giftCardValueCents,
+}) {
+  if (appliedGiftCardCode && giftCardValueCents > 0) {
+    await giftCardsService.creditBack({ code: appliedGiftCardCode, amountCents: giftCardValueCents, appointmentId });
+  }
+  if (pointsRedeemed > 0) {
+    await creditBackPoints({
+      userId,
+      points: pointsRedeemed,
+      relatedAppointmentId: appointmentId,
+      note: 'Reversed — checkout did not complete',
+    });
+  }
+  if (appliedDiscountCode) {
+    await unredeemDiscountCode(appliedDiscountCode);
+  }
 }
 
 // §5.1 — amountCents always comes from the appointment's server-computed depositCents,
@@ -90,7 +123,17 @@ export async function initiateBookingDepositPayment({
     // would hand the customer a null redirectUrl, and `window.location.href = null`
     // silently strands them on a 404 instead of ever letting them pay, with no way to
     // recover short of contacting support. Mark it failed and fall through to create a
-    // fresh checkout instead.
+    // fresh checkout instead — but first reverse whatever it already redeemed, so the
+    // fresh attempt below isn't double-spending on top of a discount/points/gift-card
+    // that were already consumed for a payment that's going nowhere.
+    await rollbackRedemptions({
+      appointmentId: appointment._id,
+      userId: appointment.userId,
+      appliedDiscountCode: existing.discountCode,
+      pointsRedeemed: existing.pointsRedeemed,
+      appliedGiftCardCode: existing.giftCardCode,
+      giftCardValueCents: existing.giftCardValueCents,
+    });
     await paymentsCollection().updateOne(
       { _id: existing._id },
       { $set: { status: PAYMENT_STATUS.FAILED, updatedAt: new Date() } }
@@ -103,49 +146,68 @@ export async function initiateBookingDepositPayment({
   let appliedDiscountCode = null;
   let pointsRedeemed = 0;
   let redemptionValueCents = 0;
-
-  // §4.9 — validated and atomically redeemed (usage-limit decrement) before the charge
-  // amount is finalized; never trust a discount's value without going through this.
-  if (discountCode) {
-    const { discountValueCents: value } = await validateDiscountCode({ code: discountCode, amountCents });
-    await redeemDiscountCode(discountCode);
-    appliedDiscountCode = discountCode.toUpperCase();
-    discountValueCents = value;
-    amountCents -= discountValueCents;
-  }
-
-  // §4.5 — only the appointment's own owner can spend their own points (never an admin
-  // booking on their behalf, never a guest — guests have no loyalty account). The cap is
-  // computed against the original deposit, not the discount-reduced amount.
-  if (pointsToRedeem > 0 && isOwner) {
-    const settings = await getSettings();
-    const preview = await previewRedemption({ pointsRequested: pointsToRedeem, amountCents: originalAmountCents, settings });
-    if (preview.points > 0) {
-      const redeemed = await redeemPoints({
-        userId: appointment.userId,
-        points: preview.points,
-        relatedAppointmentId: appointment._id,
-        note: `Redeemed at checkout for booking on ${appointment.date}`,
-      });
-      pointsRedeemed = preview.points;
-      redemptionValueCents = redeemed.valueCents;
-      amountCents -= redemptionValueCents;
-    }
-  }
-
-  // §4.7 — a gift card can cover the rest, but never below the same hard floor. Room is
-  // computed before the floor clamp so the card isn't asked to cover more than it needs
-  // to; the clamp still runs at the end as a final safety net either way.
   let giftCardValueCents = 0;
   let appliedGiftCardCode = null;
-  if (giftCardCode) {
-    const room = Math.max(amountCents - MIN_CHARGE_CENTS, 0);
-    const redeemed = await giftCardsService.redeemUpTo({ code: giftCardCode, maxAmountCents: room, appointmentId: appointment._id });
-    if (redeemed.valueCents > 0) {
-      appliedGiftCardCode = giftCardCode.toUpperCase();
-      giftCardValueCents = redeemed.valueCents;
-      amountCents -= giftCardValueCents;
+
+  // Any failure partway through this chain (an invalid gift card code after the discount
+  // and points already succeeded) must roll back whatever already succeeded before
+  // surfacing the error — otherwise the customer's discount use / real points / gift card
+  // balance are gone for a booking that never went through, and a resubmission with the
+  // same codes would redeem them a second time on top of that.
+  try {
+    // §4.9 — validated and atomically redeemed (usage-limit decrement) before the charge
+    // amount is finalized; never trust a discount's value without going through this.
+    if (discountCode) {
+      const { discountValueCents: value } = await validateDiscountCode({ code: discountCode, amountCents });
+      await redeemDiscountCode(discountCode);
+      appliedDiscountCode = discountCode.toUpperCase();
+      discountValueCents = value;
+      amountCents -= discountValueCents;
     }
+
+    // §4.5 — only the appointment's own owner can spend their own points (never an admin
+    // booking on their behalf, never a guest — guests have no loyalty account). The cap is
+    // computed against the discount-reduced running total, not the original deposit — a
+    // discount that already covers the whole booking must not still let points be spent
+    // (and really deducted from the customer's balance) for zero further benefit.
+    if (pointsToRedeem > 0 && isOwner) {
+      const settings = await getSettings();
+      const preview = await previewRedemption({ pointsRequested: pointsToRedeem, amountCents, settings });
+      if (preview.points > 0) {
+        const redeemed = await redeemPoints({
+          userId: appointment.userId,
+          points: preview.points,
+          relatedAppointmentId: appointment._id,
+          note: `Redeemed at checkout for booking on ${appointment.date}`,
+        });
+        pointsRedeemed = preview.points;
+        redemptionValueCents = redeemed.valueCents;
+        amountCents -= redemptionValueCents;
+      }
+    }
+
+    // §4.7 — a gift card can cover the rest, but never below the same hard floor. Room is
+    // computed before the floor clamp so the card isn't asked to cover more than it needs
+    // to; the clamp still runs at the end as a final safety net either way.
+    if (giftCardCode) {
+      const room = Math.max(amountCents - MIN_CHARGE_CENTS, 0);
+      const redeemed = await giftCardsService.redeemUpTo({ code: giftCardCode, maxAmountCents: room, appointmentId: appointment._id });
+      if (redeemed.valueCents > 0) {
+        appliedGiftCardCode = giftCardCode.toUpperCase();
+        giftCardValueCents = redeemed.valueCents;
+        amountCents -= giftCardValueCents;
+      }
+    }
+  } catch (err) {
+    await rollbackRedemptions({
+      appointmentId: appointment._id,
+      userId: appointment.userId,
+      appliedDiscountCode,
+      pointsRedeemed,
+      appliedGiftCardCode,
+      giftCardValueCents,
+    });
+    throw err;
   }
 
   amountCents = Math.max(amountCents, MIN_CHARGE_CENTS);
@@ -179,15 +241,37 @@ export async function initiateBookingDepositPayment({
   };
   const { insertedId } = await paymentsCollection().insertOne(doc);
 
-  const checkout = await yoco.createCheckout({
-    amountCents: doc.amountCents,
-    currency: doc.currency,
-    successUrl: `${env.CLIENT_URL}/booking/confirmation?appointmentId=${appointment._id}`,
-    cancelUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=cancelled`,
-    failureUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=failed`,
-    metadata: { paymentId: String(insertedId) },
-    idempotencyKey: String(insertedId),
-  });
+  let checkout;
+  try {
+    checkout = await yoco.createCheckout({
+      amountCents: doc.amountCents,
+      currency: doc.currency,
+      successUrl: `${env.CLIENT_URL}/booking/confirmation?appointmentId=${appointment._id}`,
+      cancelUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=cancelled`,
+      failureUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=failed`,
+      metadata: { paymentId: String(insertedId) },
+      idempotencyKey: String(insertedId),
+    });
+  } catch (err) {
+    // Found via a real repro (see the comment above on reusing a stale pending payment):
+    // Yoco itself can reject the checkout after the discount/points/gift-card were
+    // already genuinely redeemed against this payment doc. Roll them back and mark this
+    // attempt failed immediately, rather than leaving it for the next call to discover —
+    // otherwise a fast retry with the same codes would redeem them a second time on top.
+    await rollbackRedemptions({
+      appointmentId: appointment._id,
+      userId: appointment.userId,
+      appliedDiscountCode,
+      pointsRedeemed,
+      appliedGiftCardCode,
+      giftCardValueCents,
+    });
+    await paymentsCollection().updateOne(
+      { _id: insertedId },
+      { $set: { status: PAYMENT_STATUS.FAILED, updatedAt: new Date() } }
+    );
+    throw err;
+  }
 
   await paymentsCollection().updateOne(
     { _id: insertedId },
@@ -301,6 +385,42 @@ export async function initiateGiftCardPurchase({ amountCents, purchaserUserId, p
 // guarded by the appointment's own pending→confirmed transition, so it's safe even if
 // somehow invoked twice.
 async function confirmAppointmentForPaidDeposit(updated) {
+  // Late overlap re-check. The unique index the write below relies on only catches an
+  // identical startTime collision — two DIFFERENT-duration services can genuinely overlap
+  // (10:00-11:00 vs 10:30-11:30) without ever matching on that index, and the only
+  // earlier overlap check (checkSlotBookable, run once at the start of checkout) can be
+  // minutes stale by the time this webhook fires, since the customer sits on Yoco's
+  // payment page in between. Doing the overlap check again here, as the very last thing
+  // before the atomic status write, shrinks that window from minutes to milliseconds.
+  // It's not a single atomic operation with the write below — a fully airtight fix needs
+  // a multi-document transaction or a granular per-slot claim record spanning the whole
+  // booking lifecycle (create/cancel/reschedule/no-show), which is a materially bigger
+  // change than this targeted mitigation.
+  const pending = await appointmentsCollection().findOne({
+    _id: updated.appointmentId,
+    status: APPOINTMENT_STATUS.PENDING_PAYMENT,
+  });
+  if (pending) {
+    const confirmedForEmployee = await (
+      await appointmentsCollection().find({
+        employeeId: pending.employeeId,
+        date: pending.date,
+        status: APPOINTMENT_STATUS.CONFIRMED,
+      })
+    ).toArray();
+    const overlapping = confirmedForEmployee.find((a) => timeRangesOverlap(pending.startTime, pending.endTime, a.startTime, a.endTime));
+    if (overlapping) {
+      await cancelUnviableAppointment(pending, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
+      await logActivity({
+        type: 'payment_needs_review',
+        message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for an overlapping slot by the time it processed. Needs manual refund.`,
+        actorUserId: pending.userId ?? null,
+        metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
+      });
+      return;
+    }
+  }
+
   let appointment;
   try {
     appointment = await appointmentsCollection().findOneAndUpdate(
@@ -366,7 +486,7 @@ async function confirmAppointmentForPaidDeposit(updated) {
     const settings = await getSettings();
     // §4.5 — 1 point per R1 of what was actually charged (net of any discount/points
     // already applied at checkout — see initiateBookingDepositPayment).
-    const pointsEarned = Math.floor((updated.amountCents / 100) * settings.loyalty.pointsPerRand);
+    const pointsEarned = Math.floor((updated.amountCents * settings.loyalty.pointsPerRand) / 100);
     if (pointsEarned > 0) {
       await awardPoints({
         userId: appointment.userId,
@@ -453,11 +573,19 @@ export async function refundPayment({ paymentId, amountCents, reason, actor, yoc
     throw badRequest(`Refund amount must be between 1 and ${remaining} cents.`);
   }
 
+  // Stable per logical refund attempt — derived from the payment's refundedAmountCents
+  // *before* this refund, not Date.now(). A genuine retry (network timeout, a double
+  // click, two concurrent admin requests both reading the same pre-refund state) reuses
+  // this exact key, so Yoco's own idempotency layer collapses it to a single real refund
+  // even if both requests reach Yoco — the DB-side optimistic-lock guard below still
+  // decides which one gets to record it, but the money itself is never moved twice. A
+  // genuinely separate later refund naturally gets a different key once
+  // refundedAmountCents has actually changed.
   const yocoRefund = await yoco.createRefund({
     checkoutId: payment.yocoCheckoutId,
     amountCents: refundAmount,
     metadata: { paymentId: String(payment._id) },
-    idempotencyKey: `${payment._id}-refund-${Date.now()}`,
+    idempotencyKey: `${payment._id}-refund-${payment.refundedAmountCents}`,
   });
 
   const newRefundedTotal = payment.refundedAmountCents + refundAmount;

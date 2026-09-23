@@ -5,6 +5,7 @@ import { passwordResetTokensCollection } from '../models/passwordResetTokens.js'
 import { generateToken, hashToken } from '../utils/crypto.js';
 import { sendMail } from '../config/mailer.js';
 import { generateUniqueReferralCode } from './referralService.js';
+import { revokeAllRefreshTokensForUser } from './authService.js';
 import { env } from '../config/env.js';
 import { BCRYPT_COST_FACTOR, ROLES, PASSWORD_RESET_TOKEN_BYTES, PERMISSIONS } from '../config/constants.js';
 import { badRequest, conflict, notFound } from '../utils/AppError.js';
@@ -126,6 +127,11 @@ export async function updateAdminPermissions({ id, permissions, requestingUserId
     { $set: { permissions, updatedAt: new Date() } }
   );
   if (!before) throw notFound('Admin user');
+  // The access token itself carries no permissions (re-checked from the DB on every
+  // request — see auth.js's authenticate()), so this alone already takes effect
+  // immediately. Revoking refresh tokens too means their *session* is also cut, not just
+  // silently narrowed — consistent with changePassword/resetPassword already doing this.
+  await revokeAllRefreshTokensForUser(targetId);
   return toPublicUser(await usersCollection().findOne({ _id: targetId }));
 }
 
@@ -139,5 +145,9 @@ export async function revokeAdminAccess({ id, requestingUserId }) {
     { $set: { role: ROLES.CUSTOMER, permissions: [], employeeId: null, updatedAt: new Date() } }
   );
   if (!before) throw notFound('Admin user');
+  // Same reasoning as updateAdminPermissions() above — a "revoke access" action should
+  // actually kill their session, not just wait for their refresh token to naturally
+  // expire while they keep silently getting fresh (now customer-scoped) access tokens.
+  await revokeAllRefreshTokensForUser(targetId);
   return toPublicUser(await usersCollection().findOne({ _id: targetId }));
 }

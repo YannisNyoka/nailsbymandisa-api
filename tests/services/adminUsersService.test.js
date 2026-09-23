@@ -1,6 +1,7 @@
 import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
 import * as adminUsersService from '../../src/services/adminUsersService.js';
+import * as authService from '../../src/services/authService.js';
 import { usersCollection } from '../../src/models/users.js';
 import { createUserAndToken } from '../helpers/testAuth.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
@@ -104,6 +105,23 @@ describe('adminUsersService.updateAdminPermissions', () => {
       })
     ).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  it("also kills the target's existing session — their refresh token stops working, not just their next access token", async () => {
+    const { userId: actingAdminId } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [] });
+    const registered = await authService.register({
+      email: 'session-kill-1@example.com', password: 'supersecret123', firstName: 'Test', lastName: 'Admin',
+    });
+    await usersCollection().updateOne({ _id: registered.user._id }, { $set: { role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_SERVICES] } });
+    const { refreshToken } = await authService.login({ email: 'session-kill-1@example.com', password: 'supersecret123' });
+
+    await adminUsersService.updateAdminPermissions({
+      id: String(registered.user._id),
+      permissions: [],
+      requestingUserId: actingAdminId,
+    });
+
+    await expect(authService.refresh({ rawRefreshToken: refreshToken })).rejects.toMatchObject({ statusCode: 401 });
+  });
 });
 
 describe('adminUsersService.revokeAdminAccess', () => {
@@ -121,6 +139,19 @@ describe('adminUsersService.revokeAdminAccess', () => {
     await expect(
       adminUsersService.revokeAdminAccess({ id: String(userId), requestingUserId: userId })
     ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("also kills the target's existing session on revoke, not just on the next access-token check", async () => {
+    const { userId: actingAdminId } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [] });
+    const registered = await authService.register({
+      email: 'session-kill-2@example.com', password: 'supersecret123', firstName: 'Test', lastName: 'Admin',
+    });
+    await usersCollection().updateOne({ _id: registered.user._id }, { $set: { role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_SERVICES] } });
+    const { refreshToken } = await authService.login({ email: 'session-kill-2@example.com', password: 'supersecret123' });
+
+    await adminUsersService.revokeAdminAccess({ id: String(registered.user._id), requestingUserId: actingAdminId });
+
+    await expect(authService.refresh({ rawRefreshToken: refreshToken })).rejects.toMatchObject({ statusCode: 401 });
   });
 });
 

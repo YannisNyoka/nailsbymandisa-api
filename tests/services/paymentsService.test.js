@@ -300,7 +300,45 @@ describe('paymentsService.handlePaymentSucceeded — webhook idempotency', () =>
     expect((await paymentsService.getPayment(paymentB._id)).status).toBe('paid');
     const reviewEntries = (await (await activityLogCollection().find({ type: 'payment_needs_review' })).toArray());
     expect(reviewEntries).toHaveLength(1);
-    expect(reviewEntries[0].message).toMatch(/already been confirmed for the same slot/i);
+    expect(reviewEntries[0].message).toMatch(/already been confirmed for (the same|an overlapping) slot/i);
+  });
+
+  it('also catches two racing confirmations for an OVERLAPPING but non-identical slot — the unique index alone only catches an exact startTime match', async () => {
+    const userA = new ObjectId();
+    const userB = new ObjectId();
+    const service = await createTestService({ priceCents: 30000, durationMinutes: 60 });
+    const employee = await createTestEmployee();
+
+    // 10:00-11:00 and 10:30-11:30 genuinely overlap (10:30-11:00) without ever matching
+    // on (date, employeeId, startTime) — pending never blocks pending, so both bookings
+    // succeed here exactly as intended.
+    const appointmentA = await bookingService.createAppointment({
+      userId: String(userA), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '10:00',
+    });
+    const appointmentB = await bookingService.createAppointment({
+      userId: String(userB), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '10:30',
+    });
+
+    const paymentA = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointmentA._id,
+      actor: { _id: userA, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_overlap_a' }),
+    });
+    const paymentB = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointmentB._id,
+      actor: { _id: userB, role: ROLES.CUSTOMER },
+      yoco: fakeYoco({ checkoutId: 'checkout_overlap_b' }),
+    });
+
+    await paymentsService.handlePaymentSucceeded({ paymentId: paymentA._id, yocoPaymentId: 'pay_overlap_a' });
+    await expect(
+      paymentsService.handlePaymentSucceeded({ paymentId: paymentB._id, yocoPaymentId: 'pay_overlap_b' })
+    ).resolves.toBeUndefined();
+
+    // Exactly one of the two overlapping bookings ends up confirmed — never both.
+    const statusA = (await bookingService.getAppointment(appointmentA._id)).status;
+    const statusB = (await bookingService.getAppointment(appointmentB._id)).status;
+    expect([statusA, statusB].sort()).toEqual(['cancelled', 'confirmed']);
   });
 
   it('is a true no-op on replay — a second delivery cannot undo manual admin changes made in between', async () => {
@@ -395,6 +433,40 @@ describe('paymentsService.refundPayment', () => {
     ).rejects.toMatchObject({ statusCode: 400 });
   });
 
+  it('uses a stable, deterministic idempotency key per refund rather than a wall-clock value', async () => {
+    const { payment } = await paidPayment();
+    const capturedKeys = [];
+    const capturingYoco = {
+      async createRefund({ idempotencyKey }) {
+        capturedKeys.push(idempotencyKey);
+        return { id: 'rfd', refundId: `rfd_${capturedKeys.length}`, status: 'succeeded' };
+      },
+    };
+
+    // Two genuinely separate partial refunds, one after the other.
+    await paymentsService.refundPayment({
+      paymentId: payment._id,
+      amountCents: 1000,
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+      yoco: capturingYoco,
+    });
+    await paymentsService.refundPayment({
+      paymentId: payment._id,
+      amountCents: 1000,
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+      yoco: capturingYoco,
+    });
+
+    expect(capturedKeys).toHaveLength(2);
+    // Deterministic from the payment id + the refundedAmountCents this call started
+    // from — never Date.now(), so a genuine retry of the exact same logical refund
+    // (same starting refundedAmountCents) reuses the same key, letting Yoco's own
+    // idempotency layer collapse a race into a single real refund instead of two.
+    expect(capturedKeys[0]).toBe(`${payment._id}-refund-0`);
+    expect(capturedKeys[1]).toBe(`${payment._id}-refund-1000`);
+    expect(capturedKeys[0]).not.toBe(capturedKeys[1]);
+  });
+
   it('lets only one of two concurrent refunds win once the balance is exhausted', async () => {
     const { payment } = await paidPayment();
     const admin = { _id: new ObjectId(), role: ROLES.ADMIN };
@@ -471,6 +543,96 @@ describe('paymentsService.initiateBookingDepositPayment — discount + points re
     });
 
     expect(payment.amountCents).toBe(MIN_CHARGE_CENTS);
+    // The discount alone already covers the entire deposit — the points cap is computed
+    // against what's actually still owed after the discount, not the original deposit, so
+    // no real points get spent for a discount that was already free.
+    expect(payment.pointsRedeemed).toBe(0);
+    const ledger = await loyaltyService.getLedger(userId);
+    expect(ledger.pointsBalance).toBe(100000);
+  });
+
+  it('caps points redemption against the discount-reduced amount, not the original deposit', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId }); // deposit: 15000 (50% of a 30000 service)
+    // Reduces the deposit from 15000 to 10000 before points are considered.
+    await discountsService.createDiscountCode({ code: 'PARTIAL', type: 'fixed', value: 5000 });
+    await loyaltyService.awardPoints({ userId, points: 100000, source: 'test-setup' });
+
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      discountCode: 'PARTIAL',
+      pointsToRedeem: 100000,
+      yoco: fakeYoco(),
+    });
+
+    // Default maxRedemptionPercent is 50% — of the 10000 remaining after the discount,
+    // not the original 15000 deposit.
+    expect(payment.redemptionValueCents).toBeLessThanOrEqual(Math.floor((appointment.depositCents - 5000) * 0.5));
+    expect(payment.amountCents).toBe(appointment.depositCents - 5000 - payment.redemptionValueCents);
+  });
+
+  it('rolls back an already-redeemed discount and points if a later step in the same checkout fails', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    await discountsService.createDiscountCode({ code: 'ROLLBACK1', type: 'fixed', value: 2000, usageLimit: 1 });
+    await loyaltyService.awardPoints({ userId, points: 5000, source: 'test-setup' });
+
+    await expect(
+      paymentsService.initiateBookingDepositPayment({
+        appointmentId: appointment._id,
+        actor: { _id: userId, role: ROLES.CUSTOMER },
+        discountCode: 'ROLLBACK1',
+        pointsToRedeem: 100,
+        giftCardCode: 'DOES-NOT-EXIST',
+        yoco: fakeYoco(),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    // The discount's single use and the customer's real points must not be consumed for
+    // a checkout that never actually completed.
+    const discount = await discountsService.getDiscountCodeByCode('ROLLBACK1');
+    expect(discount.usesRemaining).toBe(1);
+    expect(discount.usageCount).toBe(0);
+    const ledger = await loyaltyService.getLedger(userId);
+    expect(ledger.pointsBalance).toBe(5000);
+  });
+
+  it('rolls back discount/points and does not double-redeem on retry after Yoco rejects the checkout', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    await discountsService.createDiscountCode({ code: 'ROLLBACK2', type: 'fixed', value: 2000, usageLimit: 1 });
+    await loyaltyService.awardPoints({ userId, points: 5000, source: 'test-setup' });
+
+    const failingYoco = { createCheckout: async () => { throw new Error('Yoco is down'); } };
+    await expect(
+      paymentsService.initiateBookingDepositPayment({
+        appointmentId: appointment._id,
+        actor: { _id: userId, role: ROLES.CUSTOMER },
+        discountCode: 'ROLLBACK2',
+        pointsToRedeem: 100,
+        yoco: failingYoco,
+      })
+    ).rejects.toThrow('Yoco is down');
+
+    const afterFailure = await discountsService.getDiscountCodeByCode('ROLLBACK2');
+    expect(afterFailure.usesRemaining).toBe(1);
+    expect((await loyaltyService.getLedger(userId)).pointsBalance).toBe(5000);
+
+    // Retrying with the same codes must redeem them exactly once, not stack on top of a
+    // "phantom" first redemption that was never actually rolled back.
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      discountCode: 'ROLLBACK2',
+      pointsToRedeem: 100,
+      yoco: fakeYoco(),
+    });
+    expect(payment.discountValueCents).toBe(2000);
+    expect(payment.pointsRedeemed).toBe(100);
+    const afterRetry = await discountsService.getDiscountCodeByCode('ROLLBACK2');
+    expect(afterRetry.usageCount).toBe(1);
+    expect(afterRetry.usesRemaining).toBe(0);
   });
 
   it("does not let an admin spend the appointment owner's points when booking on their behalf", async () => {

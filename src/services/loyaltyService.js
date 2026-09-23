@@ -107,6 +107,35 @@ export async function adjustPointsDown({ userId, points, note = null }) {
   return decrementBalance({ userId, points, type: LOYALTY_TRANSACTION_TYPES.ADJUST, source: 'admin_adjustment', note });
 }
 
+// Reverses redeemPoints() — needed when a checkout that already spent points fails
+// partway through (invalid gift card, Yoco rejecting the checkout), so the customer
+// isn't left having genuinely lost points for a booking that never went through.
+// Deliberately NOT awardPoints(): this credits pointsBalance back only, never
+// lifetimePointsEarned — the points were never really "earned" a second time, so this
+// must not count toward loyalty tier progression the way a real earn would.
+export async function creditBackPoints({ userId, points, relatedAppointmentId = null, note = null }) {
+  if (points <= 0) return null;
+  const uid = new ObjectId(userId);
+  const account = await loyaltyAccountsCollection().findOneAndUpdate(
+    { userId: uid },
+    { $inc: { pointsBalance: points }, $set: { updatedAt: new Date() } }
+  );
+  const balanceAfter = (account?.pointsBalance ?? 0) + points;
+
+  await loyaltyTransactionsCollection().insertOne({
+    userId: uid,
+    type: LOYALTY_TRANSACTION_TYPES.ADJUST,
+    points,
+    balanceAfter,
+    source: 'checkout_rollback',
+    relatedPaymentId: null,
+    relatedAppointmentId: relatedAppointmentId ? new ObjectId(relatedAppointmentId) : null,
+    note,
+    createdAt: new Date(),
+  });
+  return balanceAfter;
+}
+
 // Given how much of `amountCents` the caller wants to cover with points, clamps to the
 // configured max-redemption-percent-of-order cap (§4.5) and returns how many points that
 // actually costs — the caller still goes through redeemPoints() for the atomic spend.

@@ -109,6 +109,21 @@ export async function redeemDiscountCode(code) {
   return discountCodesCollection().findOne({ code: upperCode });
 }
 
+// Reverses redeemDiscountCode() — needed when a checkout that already redeemed a code
+// fails partway through (e.g. an invalid gift card code, or Yoco itself rejecting the
+// checkout), so the code isn't burned for a booking that never actually went through.
+// `isActive`/`usesRemaining` may have changed since the original redemption (an admin
+// could have deactivated it in between); this still credits usesRemaining back correctly
+// regardless, since it only reverses the exact increment this code path made.
+export async function unredeemDiscountCode(code) {
+  const upperCode = code.toUpperCase();
+  const doc = await discountCodesCollection().findOne({ code: upperCode });
+  if (!doc) return;
+  const inc = { usageCount: -1 };
+  if (doc.usesRemaining !== null) inc.usesRemaining = 1;
+  await discountCodesCollection().updateOne({ code: upperCode }, { $inc: inc, $set: { updatedAt: new Date() } });
+}
+
 export async function listDiscountCodes({ page = 1, pageSize = 20 } = {}) {
   const all = await (await discountCodesCollection().find({})).toArray();
   const sorted = sortByCreatedAtDesc(all);

@@ -170,6 +170,17 @@ export async function quoteBooking({ serviceIds, startTime }) {
   const [services, settings] = await Promise.all([loadActiveServices(serviceIds), getSettings()]);
 
   const totalDurationMinutes = services.reduce((sum, s) => sum + s.durationMinutes, 0);
+  // Every working-hours/overlap check downstream (evaluateSlot's shift.end >= endTime,
+  // timeRangesOverlap) compares HH:MM as plain strings, which only orders correctly
+  // within a single calendar day — addMinutesToTime() silently wraps a total past
+  // midnight back to a small "00:xx" value that would then lexically compare as earlier
+  // than everything, passing checks it should fail. This salon has no overnight shifts,
+  // so a booking should never legitimately need to cross midnight; reject it explicitly
+  // rather than let it silently corrupt those comparisons.
+  const [startHour, startMinute] = startTime.split(':').map(Number);
+  if (startHour * 60 + startMinute + totalDurationMinutes >= 1440) {
+    throw badRequest('This booking would run past midnight — please choose an earlier start time.');
+  }
   const endTime = addMinutesToTime(startTime, totalDurationMinutes);
   const isOffPeak = isOffPeakStart(startTime, settings.offPeakHours);
   const servicesPriceCents = services.reduce((sum, s) => sum + s.priceCents, 0);
@@ -257,10 +268,15 @@ export async function createAppointment({ userId, guestInfo, employeeId, service
     });
     return { ...doc, _id: insertedId };
   } catch (err) {
-    // Atomic re-check at the moment of write (§4.3): the unique partial index is the
-    // real guard against two concurrent requests both winning the same slot — the
-    // checkSlotBookable() call above is a fast-fail for the common case, not the source
-    // of truth. A race that slips past it is caught here as a duplicate-key error.
+    // Every new appointment is inserted as PENDING_PAYMENT, and the unique partial index
+    // (models/appointments.js) only applies to status: CONFIRMED — so this insert itself
+    // can never actually collide with it (two pending holds on the same slot are allowed
+    // by design; see SLOT_BLOCKING_STATUSES above). This catch is defensive rather than
+    // load-bearing at this call site. The real atomic guard against two concurrent
+    // requests both winning the same slot lives at *confirmation* time: the same unique
+    // index (for an identical startTime) plus the late overlap re-check in
+    // paymentsService.js's confirmAppointmentForPaidDeposit() (for an overlapping-but-
+    // different startTime, which the index alone doesn't catch).
     if (err.code === DUPLICATE_KEY_ERROR_CODE) {
       throw conflict('This slot was just booked by someone else. Please choose another time.');
     }

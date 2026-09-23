@@ -5,7 +5,9 @@ import { createFakeDb } from '../helpers/fakeDb.js';
 import { createTestService, createTestEmployee, futureDateString } from '../helpers/fixtures.js';
 import { createUserAndToken } from '../helpers/testAuth.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
+import { usersCollection } from '../../src/models/users.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
+import { ObjectId } from 'mongodb';
 
 const app = createApp();
 const DATE = futureDateString();
@@ -179,6 +181,44 @@ describe('POST /api/appointments', () => {
       });
     expect(res.status).toBe(201);
     expect(res.body.appointment.userId).toBe(String(customerId));
+  });
+
+  it('rejects booking on behalf of a user id that does not resolve to a real, active customer', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const { accessToken: adminToken } = await createUserAndToken({
+      role: ROLES.ADMIN,
+      permissions: [PERMISSIONS.MANAGE_APPOINTMENTS],
+    });
+
+    // A well-formed but nonexistent id — must not create an appointment permanently
+    // orphaned from any real user.
+    const res = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+        employeeId: String(employee._id),
+        onBehalfOfUserId: String(new ObjectId()),
+      });
+    expect(res.status).toBe(400);
+
+    // A real but blocked (isActive: false) customer must also be rejected.
+    const { userId: blockedId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    await usersCollection().updateOne({ _id: blockedId }, { $set: { isActive: false } });
+    const blockedRes = await request(app)
+      .post('/api/appointments')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '11:00',
+        employeeId: String(employee._id),
+        onBehalfOfUserId: String(blockedId),
+      });
+    expect(blockedRes.status).toBe(400);
   });
 });
 

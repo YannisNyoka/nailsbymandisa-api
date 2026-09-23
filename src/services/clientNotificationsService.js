@@ -62,6 +62,13 @@ export async function deleteNotification(notificationId, userId) {
   if (result.deletedCount === 0) throw notFound('Notification');
 }
 
+// "Clear all" (bell dropdown + full notifications page) — a real bulk delete rather than
+// the caller looping single deleteNotification() calls, which would only ever reach
+// whatever page of results it already had in hand, not every notification this user has.
+export async function deleteAllForUser(userId) {
+  await clientNotificationsCollection().deleteMany({ userId: new ObjectId(userId) });
+}
+
 // §4.11 — admin broadcast to every client, via the real in-app compose form (routes/admin.js),
 // not a chain of prompt() dialogs. One insertMany rather than an await-per-customer loop (§6.3)
 // for the in-app side; email still has to go one-per-recipient (no bulk endpoint), but

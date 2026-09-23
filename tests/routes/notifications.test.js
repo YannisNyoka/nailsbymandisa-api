@@ -65,4 +65,22 @@ describe('notifications', () => {
     const list = await request(app).get('/api/notifications').set('Authorization', `Bearer ${accessToken}`);
     expect(list.body.unreadCount).toBe(0);
   });
+
+  it('clears every one of the caller\'s notifications, never touching another user\'s', async () => {
+    const { userId, accessToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const { userId: otherUserId, accessToken: otherToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+
+    await clientNotificationsService.createClientNotification({ userId, type: 'booking_confirmed', title: 'One', body: 'Body' });
+    await clientNotificationsService.createClientNotification({ userId, type: 'booking_confirmed', title: 'Two', body: 'Body' });
+    await clientNotificationsService.createClientNotification({ userId: otherUserId, type: 'booking_confirmed', title: 'Theirs', body: 'Body' });
+
+    const res = await request(app).delete('/api/notifications').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(204);
+
+    const mine = await request(app).get('/api/notifications').set('Authorization', `Bearer ${accessToken}`);
+    expect(mine.body.total).toBe(0);
+
+    const theirs = await request(app).get('/api/notifications').set('Authorization', `Bearer ${otherToken}`);
+    expect(theirs.body.total).toBe(1);
+  });
 });

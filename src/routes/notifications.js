@@ -32,6 +32,15 @@ router.post('/read-all', async (req, res, next) => {
   }
 });
 
+router.delete('/', async (req, res, next) => {
+  try {
+    await clientNotificationsService.deleteAllForUser(req.user._id);
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.patch('/:id/read', async (req, res, next) => {
   try {
     await clientNotificationsService.markRead(req.params.id, req.user._id);

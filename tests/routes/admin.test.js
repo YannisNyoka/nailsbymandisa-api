@@ -406,6 +406,17 @@ describe('GET /api/admin/clients (list)', () => {
     const res = await request(app).get('/api/admin/clients?search=nobody-matches-this').set('Authorization', `Bearer ${adminToken}`);
     expect(res.body.total).toBe(0);
   });
+
+  it('lists clients alphabetically by first name, not by signup recency', async () => {
+    await createUserAndToken({ role: ROLES.CUSTOMER, firstName: 'Zanele' });
+    await createUserAndToken({ role: ROLES.CUSTOMER, firstName: 'Amanda' });
+    await createUserAndToken({ role: ROLES.CUSTOMER, firstName: 'Mandisa' });
+
+    const { accessToken: adminToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_CLIENTS] });
+    const res = await request(app).get('/api/admin/clients').set('Authorization', `Bearer ${adminToken}`);
+    const names = res.body.clients.map((c) => c.firstName);
+    expect(names).toEqual(['Amanda', 'Mandisa', 'Zanele']);
+  });
 });
 
 describe('POST /api/admin/clients/:id/block and /unblock', () => {

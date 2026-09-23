@@ -8,7 +8,6 @@ import { usersCollection, toPublicUser } from '../models/users.js';
 import { ROLES, APPOINTMENT_STATUS, PAYMENT_STATUS, PAYMENT_PURPOSE, PAGINATION } from '../config/constants.js';
 import { todayDateString, dateStringFor, lastNDateStrings } from '../utils/businessTime.js';
 import { badRequest, notFound } from '../utils/AppError.js';
-import { sortByCreatedAtDesc } from '../utils/sorting.js';
 import { listActivity } from './activityLogService.js';
 
 const PAID_STATUSES = [PAYMENT_STATUS.PAID, PAYMENT_STATUS.PARTIALLY_REFUNDED, PAYMENT_STATUS.REFUNDED];
@@ -315,7 +314,12 @@ export async function listClients({ page = 1, pageSize = PAGINATION.DEFAULT_LIMI
     const needle = search.trim().toLowerCase();
     all = all.filter((u) => `${u.firstName} ${u.lastName} ${u.email}`.toLowerCase().includes(needle));
   }
-  const sorted = sortByCreatedAtDesc(all);
+  // Alphabetical (first name, then last name as a tiebreaker) — this is a directory an
+  // admin scans by name to find someone, not an activity feed, so newest-first isn't
+  // the right default here.
+  const sorted = [...all].sort(
+    (a, b) => a.firstName.localeCompare(b.firstName) || a.lastName.localeCompare(b.lastName)
+  );
   const start = (page - 1) * pageSize;
   const pageOfClients = sorted.slice(start, start + pageSize);
 

@@ -92,12 +92,15 @@ export async function getOverviewStats({ employeeId } = {}) {
     pendingPayment,
     unpaidBookings: pendingPayment,
     clientCount,
-    netRevenueCents,
-    revenueTodayCents: revenueInWindow(last1),
-    revenueWeekCents: revenueInWindow(last7),
-    revenueMonthCents: revenueInWindow(last30),
-    revenueBreakdown,
-    avgBookingValueCents,
+    // Revenue is salon financial data, not staff-facing operational info — withheld
+    // entirely for a staff-scoped caller (not just narrowed to their own bookings), so
+    // it's never in the response at all, not just hidden by the admin UI.
+    netRevenueCents: employeeObjectId ? null : netRevenueCents,
+    revenueTodayCents: employeeObjectId ? null : revenueInWindow(last1),
+    revenueWeekCents: employeeObjectId ? null : revenueInWindow(last7),
+    revenueMonthCents: employeeObjectId ? null : revenueInWindow(last30),
+    revenueBreakdown: employeeObjectId ? null : revenueBreakdown,
+    avgBookingValueCents: employeeObjectId ? null : avgBookingValueCents,
     cancellationsCount,
     noShowsCount,
     completedCount,
@@ -167,8 +170,11 @@ export async function getBusinessSummary({ days = 30, employeeId } = {}) {
 
   return {
     days,
-    combinedRevenueCents,
-    revenueBreakdown,
+    // Revenue is salon financial data, not staff-facing operational info — withheld
+    // entirely for a staff-scoped caller (not just narrowed to their own bookings), so
+    // it's never in the response at all, not just hidden by the admin UI.
+    combinedRevenueCents: employeeObjectId ? null : combinedRevenueCents,
+    revenueBreakdown: employeeObjectId ? null : revenueBreakdown,
     bookingsToday,
     bookingsInWindow,
     completedCount,

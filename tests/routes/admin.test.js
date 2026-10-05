@@ -124,7 +124,7 @@ describe('GET /api/admin/overview', () => {
 });
 
 describe('GET /api/admin/overview — staff scoping', () => {
-  it("only counts a staff account's own bookings/revenue, never the whole salon's", async () => {
+  it("only counts a staff account's own bookings, and never returns any revenue figure at all", async () => {
     const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
     const service = await createTestService({ priceCents: 30000 });
     const myEmployee = await createTestEmployee();
@@ -153,8 +153,18 @@ describe('GET /api/admin/overview — staff scoping', () => {
     const { accessToken: staffToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
     const res = await request(app).get('/api/admin/overview').set('Authorization', `Bearer ${staffToken}`);
     expect(res.status).toBe(200);
+    // Still correctly scoped to just their own booking, not "theirs" too (1, not 2) —
+    // the underlying employeeId scoping is unchanged, only exposing a revenue figure at
+    // all is what's new here.
     expect(res.body.upcomingConfirmed).toBe(1);
-    expect(res.body.netRevenueCents).toBe(minePayment.amountCents);
+    // Revenue is withheld entirely for a staff-scoped caller now — not just correctly
+    // scoped to their own bookings, genuinely absent from the response.
+    expect(res.body.netRevenueCents).toBeNull();
+    expect(res.body.revenueTodayCents).toBeNull();
+    expect(res.body.revenueWeekCents).toBeNull();
+    expect(res.body.revenueMonthCents).toBeNull();
+    expect(res.body.revenueBreakdown).toBeNull();
+    expect(res.body.avgBookingValueCents).toBeNull();
     expect(res.body.recentActivity).toEqual([]);
   });
 
@@ -238,7 +248,7 @@ describe('GET /api/admin/analytics/summary', () => {
     expect(res.body.totalClients).toBe(1);
   });
 
-  it("only counts a staff account's own bookings, and hides salon-wide client/loyalty figures", async () => {
+  it("only counts a staff account's own bookings, and hides salon-wide client/loyalty/revenue figures", async () => {
     const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
     const service = await createTestService();
     const myEmployee = await createTestEmployee();
@@ -260,6 +270,8 @@ describe('GET /api/admin/analytics/summary', () => {
     expect(res.body.bookingsInWindow).toBe(1);
     expect(res.body.totalClients).toBeNull();
     expect(res.body.loyaltyMemberCount).toBeNull();
+    expect(res.body.combinedRevenueCents).toBeNull();
+    expect(res.body.revenueBreakdown).toBeNull();
   });
 });
 

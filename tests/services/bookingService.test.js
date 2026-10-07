@@ -359,6 +359,64 @@ describe('bookingService — only a paid appointment holds its slot; a pending o
     expect(staleAfter.cancelReason).toMatch(/not completed within/i);
     expect((await bookingService.getAppointment(fresh._id)).status).toBe('pending_payment');
   });
+
+  it('completeDuePastAppointments completes only confirmed appointments whose end time has passed', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+
+    // A real booking can never be *created* for a past slot (evaluateSlot's "This slot is
+    // in the past" guard) — a confirmed appointment ends up in the past only by time
+    // elapsing after it was legitimately booked, so these are inserted directly rather
+    // than through bookingService.createAppointment, mirroring remindersService.test.js's
+    // own direct-insert pattern for the same reason.
+    async function insertAppointment({ date, startTime, endTime, status }) {
+      const now = new Date();
+      const { insertedId } = await appointmentsCollection().insertOne({
+        userId: new ObjectId(),
+        guestInfo: null,
+        employeeId: employee._id,
+        serviceIds: [service._id],
+        date,
+        startTime,
+        endTime,
+        totalDurationMinutes: 60,
+        totalPriceCents: service.priceCents,
+        depositCents: 15000,
+        isOffPeak: false,
+        status,
+        paymentId: null,
+        notes: null,
+        createdByAdminId: null,
+        cancelledAt: null,
+        cancelReason: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return insertedId;
+    }
+
+    const pastId = await insertAppointment({
+      date: futureDateString(-1),
+      startTime: '11:00',
+      endTime: '12:00',
+      status: 'confirmed',
+    });
+    const upcomingId = await insertAppointment({ date: DATE, startTime: '15:00', endTime: '16:00', status: 'confirmed' });
+    // Never paid for — should stay pending_payment, not get swept up as "completed".
+    const unpaidPastId = await insertAppointment({
+      date: futureDateString(-1),
+      startTime: '09:00',
+      endTime: '10:00',
+      status: 'pending_payment',
+    });
+
+    const result = await bookingService.completeDuePastAppointments();
+    expect(result).toEqual({ completedCount: 1 });
+
+    expect((await bookingService.getAppointment(pastId)).status).toBe('completed');
+    expect((await bookingService.getAppointment(upcomingId)).status).toBe('confirmed');
+    expect((await bookingService.getAppointment(unpaidPastId)).status).toBe('pending_payment');
+  });
 });
 
 describe('bookingService.cancelAppointment — server-side cancellation window', () => {

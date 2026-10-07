@@ -1,0 +1,30 @@
+name: Complete past appointments
+
+# Flips a confirmed appointment to 'completed' once its slot has ended — nothing in the
+# app does this on its own (see src/services/bookingService.js's
+# completeDuePastAppointments), so without this job appointments stay 'confirmed' forever,
+# and admin "completed"/"completion rate" stats and the customer "book again" shortcut
+# never have anything to work with. Runs hourly, same cadence as the reminders job — a
+# same-day appointment being a little late to flip to 'completed' isn't time-sensitive.
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  complete-past-appointments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call POST /api/cron/complete-past-appointments
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" -X POST "${API_URL%/}/api/cron/complete-past-appointments" \
+            -H "X-Cron-Secret: $CRON_SECRET")
+          echo "HTTP status: $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            echo "Complete-past-appointments call failed"
+            exit 1
+          fi
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -40,3 +40,16 @@ describe('POST /api/cron/expire-unpaid-appointments', () => {
     expect(res.body).toEqual({ expiredCount: 0 });
   });
 });
+
+describe('POST /api/cron/complete-past-appointments', () => {
+  it('rejects a request with no secret header', async () => {
+    const res = await request(app).post('/api/cron/complete-past-appointments');
+    expect(res.status).toBe(401);
+  });
+
+  it('runs the completion job with the correct secret', async () => {
+    const res = await request(app).post('/api/cron/complete-past-appointments').set('X-Cron-Secret', env.CRON_SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ completedCount: 0 });
+  });
+});

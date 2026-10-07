@@ -40,3 +40,15 @@ router.post('/expire-unpaid-appointments', cronLimiter, requireCronSecret, async
     next(err);
   }
 });
+
+// Flips a confirmed appointment to 'completed' once its slot has ended — nothing else in
+// the app ever does this (see bookingService.js's completeDuePastAppointments), so
+// without this job admin "completed" stats and the customer "book again" shortcut would
+// never see anything in that status.
+router.post('/complete-past-appointments', cronLimiter, requireCronSecret, async (req, res, next) => {
+  try {
+    res.json(await bookingService.completeDuePastAppointments());
+  } catch (err) {
+    next(err);
+  }
+});

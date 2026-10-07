@@ -16,6 +16,7 @@ import {
   weekdayKeyForDate,
   toInstant,
   nowInBusinessTz,
+  todayDateString,
   addMinutesToTime,
   hoursBetween,
   timeRangesOverlap,
@@ -147,6 +148,34 @@ export async function expireDueUnpaidAppointments() {
     await cancelUnviableAppointment(appointment, `Payment was not completed within ${UNPAID_APPOINTMENT_EXPIRY_MINUTES} minutes.`);
   }
   return { expiredCount: stale.length };
+}
+
+// Cron-driven (routes/cron.js) — a confirmed appointment whose slot has already ended is,
+// as far as this app can tell, an honored booking, so it's flipped to COMPLETED. This is
+// what lets admin "completion rate"/"completed" stats (adminService.js) mean something,
+// and what lets a customer "book again" (account BookingsPage.jsx) on something the app
+// itself considers finished rather than relying only on its own "date already passed"
+// fallback. Not a per-appointment loop with notifications: this is routine bookkeeping,
+// not a customer-facing event like a cancellation.
+//
+// `date: { $lte: today }` is a cheap first-pass filter (today or earlier) so this doesn't
+// scan every confirmed appointment ever made; the real "has it actually ended yet" check
+// is the same instant comparison evaluateSlot() uses for "is this slot in the past",
+// applied to the appointment's end rather than its start.
+export async function completeDuePastAppointments() {
+  const today = todayDateString();
+  const now = nowInBusinessTz();
+  const candidates = await (
+    await appointmentsCollection().find({ status: APPOINTMENT_STATUS.CONFIRMED, date: { $lte: today } })
+  ).toArray();
+  const dueIds = candidates.filter((a) => toInstant(a.date, a.endTime) <= now).map((a) => a._id);
+  if (dueIds.length === 0) return { completedCount: 0 };
+
+  const result = await appointmentsCollection().updateMany(
+    { _id: { $in: dueIds } },
+    { $set: { status: APPOINTMENT_STATUS.COMPLETED, completedAt: new Date(), updatedAt: new Date() } }
+  );
+  return { completedCount: result.modifiedCount };
 }
 
 async function loadActiveServices(serviceIds) {

@@ -54,16 +54,32 @@ router.post('/webhook', express.raw({ type: '*/*' }), async (req, res, next) => 
     });
     if (!valid) {
       // TEMPORARY diagnostic (remove once the mismatch is found) — never logs the secret
-      // itself, only its length and a truncated SHA-256 fingerprint, so this can be safely
-      // compared against the same fingerprint computed locally for the known-correct
-      // value without ever exposing the live secret in logs.
-      req.log?.warn(
-        {
-          secretLength: env.YOCO_WEBHOOK_SECRET.length,
-          secretFingerprint: crypto.createHash('sha256').update(env.YOCO_WEBHOOK_SECRET).digest('hex').slice(0, 12),
-        },
-        'Rejected Yoco webhook with invalid signature'
-      );
+      // itself, only its length and a truncated SHA-256 fingerprint (safe to compare
+      // against the same fingerprint computed locally for the known-correct value), plus
+      // the full raw body (base64, so it round-trips exactly) and the locally-recomputed
+      // expected signature — lets a specific failure be byte-for-byte diffed afterwards,
+      // which headers-only logging can't do. Wrapped defensively: this is diagnostic-only
+      // and must never be able to turn a clean 401 into a 500 (e.g. a malformed secret in
+      // a non-production environment, or a request missing headers this assumes exist).
+      try {
+        const secretBytes = Buffer.from(env.YOCO_WEBHOOK_SECRET.split('_')[1], 'base64');
+        const signedContent = `${req.headers['webhook-id']}.${req.headers['webhook-timestamp']}.${rawBody}`;
+        const expectedSignature = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
+        req.log?.warn(
+          {
+            secretLength: env.YOCO_WEBHOOK_SECRET.length,
+            secretFingerprint: crypto.createHash('sha256').update(env.YOCO_WEBHOOK_SECRET).digest('hex').slice(0, 12),
+            receivedSignatureHeader: req.headers['webhook-signature'],
+            expectedSignature: `v1,${expectedSignature}`,
+            contentLengthHeader: req.headers['content-length'],
+            actualBodyByteLength: req.body.length,
+            rawBodyBase64: rawBody ? Buffer.from(rawBody, 'utf8').toString('base64') : null,
+          },
+          'Rejected Yoco webhook with invalid signature'
+        );
+      } catch (diagnosticErr) {
+        req.log?.warn({ err: diagnosticErr }, 'Rejected Yoco webhook with invalid signature (diagnostic logging itself failed)');
+      }
       return res.status(401).json({ error: { message: 'Invalid webhook signature.' } });
     }
 

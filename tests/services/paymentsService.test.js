@@ -461,6 +461,59 @@ describe('paymentsService.reconcilePendingPayment — fallback for a lost/reject
   });
 });
 
+describe('paymentsService.reconcileAllPendingPayments — cron sweep over every pending_payment appointment', () => {
+  function fakeYocoByCheckoutId(statusByCheckoutId) {
+    let counter = 0;
+    return {
+      async createCheckout(args) {
+        counter += 1;
+        const id = `checkout_sweep_${counter}`;
+        return { id, redirectUrl: `https://c.yoco.com/checkout/${id}`, ...args };
+      },
+      async getCheckout(checkoutId) {
+        return { status: statusByCheckoutId[checkoutId] ?? 'started', paymentId: `pay_${checkoutId}` };
+      },
+    };
+  }
+
+  it('confirms every pending appointment Yoco reports as completed and leaves the rest alone', async () => {
+    const userA = new ObjectId();
+    const userB = new ObjectId();
+    const userC = new ObjectId();
+    const appointmentA = await bookAppointment({ userId: userA, startTime: '09:00' });
+    const appointmentB = await bookAppointment({ userId: userB, startTime: '12:00' });
+    const appointmentC = await bookAppointment({ userId: userC, startTime: '15:00' });
+
+    // Paid in full before any checkout completes, so no real payment ever gets created —
+    // confirms the sweep skips a pending_payment appointment with nothing to reconcile at
+    // all, rather than erroring on it.
+    const appointmentD = await bookAppointment({ userId: new ObjectId(), startTime: '17:00' });
+
+    const yoco = fakeYocoByCheckoutId({
+      checkout_sweep_1: 'completed',
+      checkout_sweep_2: 'started',
+      checkout_sweep_3: 'completed',
+    });
+
+    await paymentsService.initiateBookingDepositPayment({ appointmentId: appointmentA._id, actor: { _id: userA, role: ROLES.CUSTOMER }, yoco });
+    await paymentsService.initiateBookingDepositPayment({ appointmentId: appointmentB._id, actor: { _id: userB, role: ROLES.CUSTOMER }, yoco });
+    await paymentsService.initiateBookingDepositPayment({ appointmentId: appointmentC._id, actor: { _id: userC, role: ROLES.CUSTOMER }, yoco });
+
+    const result = await paymentsService.reconcileAllPendingPayments({ yoco });
+
+    expect(result).toEqual({ scannedCount: 4, confirmedCount: 2 });
+    expect((await bookingService.getAppointment(appointmentA._id)).status).toBe('confirmed');
+    expect((await bookingService.getAppointment(appointmentB._id)).status).toBe('pending_payment');
+    expect((await bookingService.getAppointment(appointmentC._id)).status).toBe('confirmed');
+    expect((await bookingService.getAppointment(appointmentD._id)).status).toBe('pending_payment');
+  });
+
+  it('is a no-op that scans nothing when no appointment is pending_payment', async () => {
+    const result = await paymentsService.reconcileAllPendingPayments({ yoco: fakeYocoByCheckoutId({}) });
+    expect(result).toEqual({ scannedCount: 0, confirmedCount: 0 });
+  });
+});
+
 describe('paymentsService.refundPayment', () => {
   async function paidPayment() {
     const userId = new ObjectId();

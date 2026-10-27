@@ -1,0 +1,34 @@
+name: Reconcile pending payments
+
+# The Yoco webhook has proven unreliable in ways this never got fully root-caused on our
+# side — genuine, confirmed-paid customers have had their webhook delivery rejected with
+# "No matching signature found" even with a verified-correct secret and no duplicate
+# subscriptions, both for brand-new checkouts and retries alike. Rather than depend on
+# the webhook alone, this asks Yoco directly whether each currently pending_payment
+# appointment's checkout actually completed, and confirms it if so
+# (paymentsService.reconcileAllPendingPayments). Runs every 5 minutes — the same cadence
+# as expire-unpaid-appointments.yml — specifically so a genuinely-paid booking has a real
+# chance to get confirmed before that job's 15-minute window would otherwise cancel it
+# out from under the customer.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  reconcile-pending-payments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call POST /api/cron/reconcile-pending-payments
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" -X POST "${API_URL%/}/api/cron/reconcile-pending-payments" \
+            -H "X-Cron-Secret: $CRON_SECRET")
+          echo "HTTP status: $status"
+          cat response.json
+          if [ "$status" -ge 300 ]; then
+            echo "Reconcile-pending-payments call failed"
+            exit 1
+          fi
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

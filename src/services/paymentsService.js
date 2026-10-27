@@ -587,6 +587,37 @@ export async function reconcilePendingPayment({ appointmentId, yoco = defaultYoc
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Cron-driven (routes/cron.js) — reconcilePendingPayment only ever runs when a customer's
+// own browser happens to poll the confirmation page, so it does nothing for a guest (or
+// anyone else) who closes the tab before that poll succeeds. This sweeps every currently
+// pending_payment appointment the same way, on a schedule, so a genuinely-paid booking
+// gets confirmed within minutes regardless of whether anyone's browser is still around to
+// ask — specifically so it has a real chance to beat expireDueUnpaidAppointments' 15-minute
+// window, not just eventually catch up after the slot's already been wrongly cancelled.
+// A small delay between checkouts keeps this polite to Yoco's API rather than firing
+// dozens of requests at once.
+export async function reconcileAllPendingPayments({ yoco = defaultYoco } = {}) {
+  const pendingAppointments = await (
+    await appointmentsCollection().find({ status: APPOINTMENT_STATUS.PENDING_PAYMENT })
+  ).toArray();
+
+  let confirmedCount = 0;
+  for (const appointment of pendingAppointments) {
+    // eslint-disable-next-line no-await-in-loop -- a periodic sweep, not a hot request path
+    await reconcilePendingPayment({ appointmentId: appointment._id, yoco });
+    // eslint-disable-next-line no-await-in-loop
+    const after = await appointmentsCollection().findOne({ _id: appointment._id });
+    if (after.status === APPOINTMENT_STATUS.CONFIRMED) confirmedCount += 1;
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(120);
+  }
+  return { scannedCount: pendingAppointments.length, confirmedCount };
+}
+
 // §4.4 — refunds: admin-triggered, recorded against the original payment, appointment
 // status updated accordingly. §6.1 — the floor check (can't refund more than remains)
 // and the write happen as one atomic operation guarded on refundedAmountCents, so two

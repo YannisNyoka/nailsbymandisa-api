@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import * as remindersService from '../services/remindersService.js';
 import * as bookingService from '../services/bookingService.js';
+import * as paymentsService from '../services/paymentsService.js';
 import { env } from '../config/env.js';
 import { unauthorized } from '../utils/AppError.js';
 import { cronLimiter } from '../middleware/rateLimit.js';
@@ -48,6 +49,21 @@ router.post('/expire-unpaid-appointments', cronLimiter, requireCronSecret, async
 router.post('/complete-past-appointments', cronLimiter, requireCronSecret, async (req, res, next) => {
   try {
     res.json(await bookingService.completeDuePastAppointments());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Checks every currently pending_payment appointment directly against Yoco and confirms
+// any that actually completed — the same fallback paymentsService.reconcilePendingPayment
+// already runs when a customer's own browser polls the confirmation page, but run here on
+// a schedule so a genuinely-paid booking still gets confirmed even if nobody's browser is
+// around to ask. Runs at the same 5-minute cadence as expire-unpaid-appointments
+// specifically so it has a real chance to beat that job's 15-minute window, rather than
+// only ever cleaning up the mess after a paid slot's already been wrongly cancelled.
+router.post('/reconcile-pending-payments', cronLimiter, requireCronSecret, async (req, res, next) => {
+  try {
+    res.json(await paymentsService.reconcileAllPendingPayments());
   } catch (err) {
     next(err);
   }

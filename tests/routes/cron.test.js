@@ -53,3 +53,19 @@ describe('POST /api/cron/complete-past-appointments', () => {
     expect(res.body).toEqual({ completedCount: 0 });
   });
 });
+
+describe('POST /api/cron/reconcile-pending-payments', () => {
+  it('rejects a request with no secret header', async () => {
+    const res = await request(app).post('/api/cron/reconcile-pending-payments');
+    expect(res.status).toBe(401);
+  });
+
+  // No pending_payment appointment exists in this fresh fake DB, so the sweep's own loop
+  // never runs and never reaches out to the real Yoco API — same zero-result shape as the
+  // other cron jobs above on an empty DB.
+  it('runs the reconciliation sweep with the correct secret', async () => {
+    const res = await request(app).post('/api/cron/reconcile-pending-payments').set('X-Cron-Secret', env.CRON_SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ scannedCount: 0, confirmedCount: 0 });
+  });
+});

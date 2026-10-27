@@ -47,6 +47,13 @@ export async function createRefund({ checkoutId, amountCents, metadata, idempote
   });
 }
 
+// Used as a fallback reconciliation path (paymentsService.reconcilePendingPayment) for
+// when a webhook delivery is lost, delayed, or rejected — asks Yoco directly whether a
+// checkout actually completed, rather than only ever trusting an inbound webhook call.
+export async function getCheckout(checkoutId) {
+  return yocoFetch(`/checkouts/${checkoutId}`, { method: 'GET' });
+}
+
 // Standard Webhooks scheme (https://www.standardwebhooks.com — Yoco's webhooks follow it
 // exactly), verified via Yoco's own recommended `standardwebhooks` library rather than a
 // hand-rolled HMAC check — also gives replay protection for free (rejects a

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import * as bookingService from '../services/bookingService.js';
+import * as paymentsService from '../services/paymentsService.js';
 import { getSettings } from '../services/settingsService.js';
 import { appointmentsCollection } from '../models/appointments.js';
 import { usersCollection } from '../models/users.js';
@@ -192,6 +193,28 @@ router.get('/:id', authenticate, async (req, res, next) => {
     const isOwner = appointment.userId && String(appointment.userId) === String(req.user._id);
     if (!isOwner && req.user.role !== ROLES.ADMIN) return next(forbidden());
     res.json({ appointment });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Powers the booking-confirmation page's post-payment poll — for both a logged-in
+// customer AND a guest, so it uses the same owner/admin/unclaimed-guest-booking access
+// check as payments.js's checkout initiation, not authenticate (a guest has no account to
+// authenticate with). Before returning the appointment, asks Yoco directly whether the
+// payment actually completed (paymentsService.reconcilePendingPayment) — a fallback for
+// when the webhook that should have confirmed it was lost, delayed, or rejected. Rate
+// limited same as checkout: it makes a real outbound call to Yoco each time.
+router.post('/:id/check-payment', optionalAuthenticate, checkoutLimiter, async (req, res, next) => {
+  try {
+    const appointment = await bookingService.getAppointment(req.params.id);
+    const isOwner = appointment.userId && req.user && String(appointment.userId) === String(req.user._id);
+    const isAdmin = req.user?.role === ROLES.ADMIN;
+    const isUnclaimedGuestBooking = !appointment.userId && !req.user;
+    if (!isOwner && !isAdmin && !isUnclaimedGuestBooking) return next(forbidden());
+
+    await paymentsService.reconcilePendingPayment({ appointmentId: appointment._id });
+    res.json({ appointment: await bookingService.getAppointment(req.params.id) });
   } catch (err) {
     next(err);
   }

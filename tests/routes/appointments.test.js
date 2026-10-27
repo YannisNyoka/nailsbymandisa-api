@@ -4,6 +4,7 @@ import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
 import { createTestService, createTestEmployee, futureDateString } from '../helpers/fixtures.js';
 import { createUserAndToken } from '../helpers/testAuth.js';
+import * as bookingService from '../../src/services/bookingService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { usersCollection } from '../../src/models/users.js';
 import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
@@ -357,5 +358,84 @@ describe('GET /api/appointments/slots', () => {
     const res = await request(app).get('/api/appointments/slots').query({ serviceIds: String(service._id), date: DATE });
     expect(res.status).toBe(200);
     expect(res.body.slots).toContain('10:00');
+  });
+});
+
+// Access control only — the actual Yoco-reconciliation behavior (confirming a
+// pending_payment appointment whose checkout turns out to be completed) is covered with a
+// dependency-injected fake Yoco client at the service level
+// (paymentsService.test.js's "reconcilePendingPayment" suite). Every appointment used here
+// has no payment record at all, so reconcilePendingPayment's own early-return guard means
+// this never actually reaches out to the real Yoco API.
+describe('POST /api/appointments/:id/check-payment', () => {
+  async function guestAppointment() {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const res = await request(app)
+      .post('/api/appointments')
+      .send({
+        serviceIds: [String(service._id)],
+        date: DATE,
+        startTime: '10:00',
+        employeeId: String(employee._id),
+        guestInfo: { name: 'Guest', email: 'guest@example.com', phone: '0821234567' },
+      });
+    return res.body.appointment;
+  }
+
+  async function ownedAppointment(userId) {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    return bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+  }
+
+  it('lets an anonymous caller check an unclaimed guest booking', async () => {
+    const appointment = await guestAppointment();
+    const res = await request(app).post(`/api/appointments/${appointment._id}/check-payment`);
+    expect(res.status).toBe(200);
+    expect(res.body.appointment._id).toBe(appointment._id);
+  });
+
+  it("rejects an anonymous caller checking a logged-in customer's appointment", async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const appointment = await ownedAppointment(userId);
+    const res = await request(app).post(`/api/appointments/${appointment._id}/check-payment`);
+    expect(res.status).toBe(403);
+  });
+
+  it('lets the owner check their own appointment', async () => {
+    const { userId, accessToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const appointment = await ownedAppointment(userId);
+    const res = await request(app)
+      .post(`/api/appointments/${appointment._id}/check-payment`)
+      .set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.appointment.status).toBe('pending_payment');
+  });
+
+  it("rejects a different logged-in customer checking someone else's appointment", async () => {
+    const { userId: owner } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const { accessToken: strangerToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const appointment = await ownedAppointment(owner);
+    const res = await request(app)
+      .post(`/api/appointments/${appointment._id}/check-payment`)
+      .set('Authorization', `Bearer ${strangerToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('lets an admin check any appointment', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const { accessToken: adminToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [] });
+    const appointment = await ownedAppointment(userId);
+    const res = await request(app)
+      .post(`/api/appointments/${appointment._id}/check-payment`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
   });
 });

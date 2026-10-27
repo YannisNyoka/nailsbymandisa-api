@@ -373,6 +373,94 @@ describe('paymentsService.handlePaymentSucceeded — webhook idempotency', () =>
   });
 });
 
+describe('paymentsService.reconcilePendingPayment — fallback for a lost/rejected webhook', () => {
+  function fakeYocoCheckoutStatus(status, { checkoutId = 'checkout_test_1', paymentId = 'pay_reconciled' } = {}) {
+    return {
+      async createCheckout(args) {
+        return { id: checkoutId, redirectUrl: `https://c.yoco.com/checkout/${checkoutId}`, ...args };
+      },
+      async getCheckout() {
+        return { status, paymentId };
+      },
+    };
+  }
+
+  it('confirms the appointment when Yoco reports the checkout as completed, even though no webhook ever arrived', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: fakeYocoCheckoutStatus('completed'),
+    });
+
+    await paymentsService.reconcilePendingPayment({
+      appointmentId: appointment._id,
+      yoco: fakeYocoCheckoutStatus('completed'),
+    });
+
+    expect((await paymentsService.getPayment(payment._id)).status).toBe('paid');
+    expect((await bookingService.getAppointment(appointment._id)).status).toBe('confirmed');
+  });
+
+  it('leaves the appointment pending when Yoco reports the checkout as still in progress', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: fakeYocoCheckoutStatus('started'),
+    });
+
+    await paymentsService.reconcilePendingPayment({
+      appointmentId: appointment._id,
+      yoco: fakeYocoCheckoutStatus('started'),
+    });
+
+    expect((await bookingService.getAppointment(appointment._id)).status).toBe('pending_payment');
+  });
+
+  it('is a no-op for an appointment that is not pending_payment — never calls Yoco at all', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: fakeYoco(),
+    });
+    await paymentsService.handlePaymentSucceeded({ paymentId: payment._id, yocoPaymentId: 'pay_already_confirmed' });
+
+    let getCheckoutCalls = 0;
+    await paymentsService.reconcilePendingPayment({
+      appointmentId: appointment._id,
+      yoco: { async getCheckout() { getCheckoutCalls += 1; return { status: 'completed' }; } },
+    });
+
+    expect(getCheckoutCalls).toBe(0);
+  });
+
+  it('is idempotent alongside a webhook that also eventually fires for the same payment', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: fakeYocoCheckoutStatus('completed'),
+    });
+
+    await paymentsService.reconcilePendingPayment({
+      appointmentId: appointment._id,
+      yoco: fakeYocoCheckoutStatus('completed'),
+    });
+    // The webhook turns up anyway, moments later, for the same event.
+    await expect(
+      paymentsService.handlePaymentSucceeded({ paymentId: payment._id, yocoPaymentId: 'pay_reconciled' })
+    ).resolves.toBeUndefined();
+
+    expect((await bookingService.getAppointment(appointment._id)).status).toBe('confirmed');
+  });
+});
+
 describe('paymentsService.refundPayment', () => {
   async function paidPayment() {
     const userId = new ObjectId();

@@ -557,6 +557,36 @@ export async function handlePaymentFailed({ paymentId }) {
   );
 }
 
+// Fallback reconciliation, independent of the webhook — for when a customer lands back
+// on the confirmation page after actually paying, but the webhook that should have
+// confirmed it was lost, delayed, or rejected for any reason. The webhook stays the
+// primary, faster confirmation path (and the only one that fires for a tab that's closed
+// and never reopened), but this closes the gap rather than leaving a genuinely-paid
+// customer's slot sitting unconfirmed until the unpaid-appointment cleanup cron cancels
+// it out from under them.
+//
+// Safe to call unconditionally and as often as the confirmation page wants to poll:
+// no-ops unless the appointment is still pending_payment with a real pending payment
+// attached, and the booking is only ever confirmed because Yoco's own API — not the
+// caller — reports the checkout as completed. handlePaymentSucceeded is itself idempotent,
+// so this can never double-confirm even if the webhook and this both eventually fire for
+// the same payment.
+export async function reconcilePendingPayment({ appointmentId, yoco = defaultYoco }) {
+  const appointment = await appointmentsCollection().findOne({ _id: new ObjectId(appointmentId) });
+  if (!appointment || appointment.status !== APPOINTMENT_STATUS.PENDING_PAYMENT) return;
+
+  const payment = await paymentsCollection().findOne({
+    appointmentId: appointment._id,
+    status: PAYMENT_STATUS.PENDING,
+  });
+  if (!payment?.yocoCheckoutId) return;
+
+  const checkout = await yoco.getCheckout(payment.yocoCheckoutId);
+  if (checkout.status === 'completed') {
+    await handlePaymentSucceeded({ paymentId: String(payment._id), yocoPaymentId: checkout.paymentId });
+  }
+}
+
 // §4.4 — refunds: admin-triggered, recorded against the original payment, appointment
 // status updated accordingly. §6.1 — the floor check (can't refund more than remains)
 // and the write happen as one atomic operation guarded on refundedAmountCents, so two

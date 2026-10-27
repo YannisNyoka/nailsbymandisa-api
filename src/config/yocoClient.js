@@ -1,5 +1,7 @@
-import crypto from 'node:crypto';
+import { Webhook, WebhookVerificationError } from 'standardwebhooks';
 import { env } from './env.js';
+
+export { WebhookVerificationError };
 
 // Thin wrapper around Yoco's Checkout API (https://developer.yoco.com/online). Kept as
 // the ONLY module that knows Yoco's URLs/payload shapes, so paymentsService stays
@@ -45,26 +47,16 @@ export async function createRefund({ checkoutId, amountCents, metadata, idempote
   });
 }
 
-// Standard Webhooks scheme (https://www.standardwebhooks.com — Yoco's webhooks follow
-// it exactly): sign "{id}.{timestamp}.{raw body}" with HMAC-SHA256 using the base64
-// portion of the whsec_-prefixed secret, compare against the "v1,<sig>" value(s) in the
-// webhook-signature header. §4.4/§5.2 — this is the fail-closed gate: env.js already
-// refuses to boot without YOCO_WEBHOOK_SECRET, and a missing/malformed signature header
-// here is treated as invalid, never as "skip verification".
-export function verifyWebhookSignature({ webhookId, webhookTimestamp, webhookSignature, rawBody }) {
-  if (!webhookId || !webhookTimestamp || !webhookSignature) return false;
-
-  const secretBytes = Buffer.from(env.YOCO_WEBHOOK_SECRET.split('_').pop(), 'base64');
-  const signedContent = `${webhookId}.${webhookTimestamp}.${rawBody}`;
-  const expected = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
-  const expectedBuf = Buffer.from(expected);
-
-  return webhookSignature
-    .split(' ')
-    .map((part) => part.split(',')[1])
-    .filter(Boolean)
-    .some((sig) => {
-      const sigBuf = Buffer.from(sig);
-      return sigBuf.length === expectedBuf.length && crypto.timingSafeEqual(sigBuf, expectedBuf);
-    });
+// Standard Webhooks scheme (https://www.standardwebhooks.com — Yoco's webhooks follow it
+// exactly), verified via Yoco's own recommended `standardwebhooks` library rather than a
+// hand-rolled HMAC check — also gives replay protection for free (rejects a
+// webhook-timestamp more than 5 minutes stale or from the future, the library's own fixed
+// WEBHOOK_TOLERANCE_IN_SECONDS). §4.4/§5.2 — this is the fail-closed gate: env.js already
+// refuses to boot without YOCO_WEBHOOK_SECRET, and any verification failure (missing
+// headers, bad signature, stale timestamp) throws WebhookVerificationError rather than
+// ever treating a problem as "skip verification". Returns the already-JSON-parsed event
+// payload on success — the raw body only needs to be read once, by this.
+export function verifyAndParseWebhook({ headers, rawBody }) {
+  const wh = new Webhook(env.YOCO_WEBHOOK_SECRET);
+  return wh.verify(rawBody, headers);
 }

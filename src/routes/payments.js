@@ -3,7 +3,7 @@ import { Router } from 'express';
 import express from 'express';
 import { z } from 'zod';
 import * as paymentsService from '../services/paymentsService.js';
-import { verifyWebhookSignature } from '../config/yocoClient.js';
+import { verifyAndParseWebhook, WebhookVerificationError } from '../config/yocoClient.js';
 import { paymentsCollection } from '../models/payments.js';
 import { validate } from '../middleware/validate.js';
 import { authenticate, optionalAuthenticate, requirePermission } from '../middleware/auth.js';
@@ -46,31 +46,28 @@ router.post(
 router.post('/webhook', express.raw({ type: '*/*' }), async (req, res, next) => {
   try {
     const rawBody = req.body.toString('utf8');
-    const valid = verifyWebhookSignature({
-      webhookId: req.headers['webhook-id'],
-      webhookTimestamp: req.headers['webhook-timestamp'],
-      webhookSignature: req.headers['webhook-signature'],
-      rawBody,
-    });
-    if (!valid) {
-      // TEMPORARY diagnostic (remove once the mismatch is found) — never logs the secret
-      // itself, only its length and a truncated SHA-256 fingerprint (safe to compare
-      // against the same fingerprint computed locally for the known-correct value), plus
-      // the full raw body (base64, so it round-trips exactly) and the locally-recomputed
-      // expected signature — lets a specific failure be byte-for-byte diffed afterwards,
-      // which headers-only logging can't do. Wrapped defensively: this is diagnostic-only
-      // and must never be able to turn a clean 401 into a 500 (e.g. a malformed secret in
-      // a non-production environment, or a request missing headers this assumes exist).
+    let event;
+    try {
+      event = verifyAndParseWebhook({ headers: req.headers, rawBody });
+    } catch (err) {
+      if (!(err instanceof WebhookVerificationError)) throw err;
+      // TEMPORARY diagnostic (remove once the mismatch is found) — `err.message` now
+      // gives the *specific* rejection reason (missing headers / stale or future
+      // timestamp / no matching signature), which is far more useful than the old
+      // hand-rolled check's bare true/false. Also logs the secret's length and a
+      // truncated SHA-256 fingerprint (safe — never the secret itself) plus the full raw
+      // body (base64, round-trips exactly) so a "no matching signature" failure can be
+      // byte-for-byte diffed afterwards. Wrapped defensively: diagnostic-only, must never
+      // turn a clean 401 into a 500.
       try {
-        const secretBytes = Buffer.from(env.YOCO_WEBHOOK_SECRET.split('_')[1], 'base64');
-        const signedContent = `${req.headers['webhook-id']}.${req.headers['webhook-timestamp']}.${rawBody}`;
-        const expectedSignature = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
         req.log?.warn(
           {
+            reason: err.message,
             secretLength: env.YOCO_WEBHOOK_SECRET.length,
             secretFingerprint: crypto.createHash('sha256').update(env.YOCO_WEBHOOK_SECRET).digest('hex').slice(0, 12),
             receivedSignatureHeader: req.headers['webhook-signature'],
-            expectedSignature: `v1,${expectedSignature}`,
+            receivedTimestampHeader: req.headers['webhook-timestamp'],
+            serverUnixTime: Math.floor(Date.now() / 1000),
             contentLengthHeader: req.headers['content-length'],
             actualBodyByteLength: req.body.length,
             rawBodyBase64: rawBody ? Buffer.from(rawBody, 'utf8').toString('base64') : null,
@@ -83,7 +80,6 @@ router.post('/webhook', express.raw({ type: '*/*' }), async (req, res, next) => 
       return res.status(401).json({ error: { message: 'Invalid webhook signature.' } });
     }
 
-    const event = JSON.parse(rawBody);
     const paymentId = event.payload?.metadata?.paymentId;
 
     switch (event.type) {

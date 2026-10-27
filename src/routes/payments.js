@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import express from 'express';
 import { z } from 'zod';
@@ -8,6 +9,7 @@ import { validate } from '../middleware/validate.js';
 import { authenticate, optionalAuthenticate, requirePermission } from '../middleware/auth.js';
 import { checkoutLimiter } from '../middleware/rateLimit.js';
 import { PERMISSIONS, PAGINATION } from '../config/constants.js';
+import { env } from '../config/env.js';
 
 export const router = Router();
 
@@ -51,7 +53,17 @@ router.post('/webhook', express.raw({ type: '*/*' }), async (req, res, next) => 
       rawBody,
     });
     if (!valid) {
-      req.log?.warn('Rejected Yoco webhook with invalid signature');
+      // TEMPORARY diagnostic (remove once the mismatch is found) — never logs the secret
+      // itself, only its length and a truncated SHA-256 fingerprint, so this can be safely
+      // compared against the same fingerprint computed locally for the known-correct
+      // value without ever exposing the live secret in logs.
+      req.log?.warn(
+        {
+          secretLength: env.YOCO_WEBHOOK_SECRET.length,
+          secretFingerprint: crypto.createHash('sha256').update(env.YOCO_WEBHOOK_SECRET).digest('hex').slice(0, 12),
+        },
+        'Rejected Yoco webhook with invalid signature'
+      );
       return res.status(401).json({ error: { message: 'Invalid webhook signature.' } });
     }
 

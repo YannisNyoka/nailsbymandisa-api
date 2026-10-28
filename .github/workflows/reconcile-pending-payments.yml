@@ -6,13 +6,14 @@ name: Reconcile pending payments
 # subscriptions, both for brand-new checkouts and retries alike. Rather than depend on
 # the webhook alone, this asks Yoco directly whether each currently pending_payment
 # appointment's checkout actually completed, and confirms it if so
-# (paymentsService.reconcileAllPendingPayments). Runs every 5 minutes — the same cadence
-# as expire-unpaid-appointments.yml — specifically so a genuinely-paid booking has a real
-# chance to get confirmed before that job's 15-minute window would otherwise cancel it
-# out from under the customer.
+# (paymentsService.reconcileAllPendingPayments). Runs every minute — well inside
+# expire-unpaid-appointments.yml's 15-minute cancellation window — as the last-resort
+# backstop behind the redirect-time check (paymentsService.js's API_BASE_URL/successUrl)
+# and the confirmation page's own poll. GitHub Actions doesn't guarantee exact per-minute
+# punctuality under load, so treat this as "close to every minute," not a hard SLA.
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
   workflow_dispatch: {}
 
 jobs:

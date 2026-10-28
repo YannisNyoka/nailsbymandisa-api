@@ -40,6 +40,22 @@ router.post(
   }
 );
 
+// Yoco's success redirect lands here first, not straight on the frontend (see
+// paymentsService.js's API_BASE_URL/successUrl) — this runs the same Yoco-backed
+// reconciliation the confirmation page itself polls, but synchronously, before the
+// customer's browser has a page to navigate away from. Never blocks the redirect: if
+// the reconcile fails for any reason, the frontend's own poll (and the cron sweep) still
+// cover it. No auth — same as the confirmation page itself, since guests use this too
+// and the appointment ID isn't guessable ahead of a real checkout.
+router.get('/redirect/:appointmentId', checkoutLimiter, async (req, res) => {
+  try {
+    await paymentsService.reconcilePendingPayment({ appointmentId: req.params.appointmentId });
+  } catch (err) {
+    req.log?.warn({ err }, 'Reconcile-on-redirect failed; confirmation page poll will retry');
+  }
+  res.redirect(302, `${env.CLIENT_URL}/booking/confirmation?appointmentId=${req.params.appointmentId}`);
+});
+
 // Yoco's raw request body (before JSON parsing) is required to verify the HMAC
 // signature — app.js already skips the global express.json() for this exact path.
 // §4.4/§5.2 — signature verification fails closed: no secret, no bypass, ever.

@@ -38,6 +38,13 @@ const envSchema = z
 
     CORS_ORIGINS: csvUrls,
     CLIENT_URL: z.string().url(),
+    // Render auto-populates this for every web service with the URL it's publicly
+    // reachable at — nothing to set manually. Used to build the Yoco success-redirect
+    // URL so it bounces through our own API first (routes/payments.js '/redirect/:id')
+    // before handing the browser to the frontend, so a payment can be confirmed
+    // server-side before the customer even has a page to navigate away from. Falls back
+    // to localhost in dev, where Render doesn't set it.
+    RENDER_EXTERNAL_URL: z.string().url().optional().or(z.literal('')),
 
     YOCO_SECRET_KEY: z.string().min(1, 'Yoco secret key is required (dashboard → Settings → API Keys)'),
     YOCO_WEBHOOK_SECRET: secret(16),

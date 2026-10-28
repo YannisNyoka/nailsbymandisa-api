@@ -75,6 +75,29 @@ describe('POST /api/payments/:id/refund', () => {
   });
 });
 
+describe('GET /api/payments/redirect/:appointmentId', () => {
+  it('redirects to the confirmation page for a non-existent appointment rather than erroring', async () => {
+    const fakeId = new ObjectId();
+    const res = await request(app).get(`/api/payments/redirect/${fakeId}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`http://localhost:5173/booking/confirmation?appointmentId=${fakeId}`);
+  });
+
+  it('redirects to the confirmation page for an appointment that is not pending_payment', async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const appointment = await bookAppointment(userId);
+    const res = await request(app).get(`/api/payments/redirect/${appointment._id}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`http://localhost:5173/booking/confirmation?appointmentId=${appointment._id}`);
+  });
+
+  it('redirects even for a malformed appointment id, instead of erroring', async () => {
+    const res = await request(app).get('/api/payments/redirect/not-a-valid-id');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('http://localhost:5173/booking/confirmation?appointmentId=not-a-valid-id');
+  });
+});
+
 describe('POST /api/payments/webhook', () => {
   it('rejects a request with an invalid signature', async () => {
     const rawBody = JSON.stringify({ type: 'payment.succeeded', payload: { id: 'pay_1', metadata: {} } });

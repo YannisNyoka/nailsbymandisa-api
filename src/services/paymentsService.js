@@ -24,6 +24,12 @@ import {
 } from '../config/constants.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../utils/AppError.js';
 
+// Yoco's success redirect bounces through our own API first (routes/payments.js
+// '/redirect/:appointmentId') rather than straight to the frontend, so the payment can
+// be confirmed server-side before the customer's browser has even rendered a page to
+// navigate away from.
+const API_BASE_URL = env.RENDER_EXTERNAL_URL || `http://localhost:${env.PORT}`;
+
 export function assertPaymentAccess(payment, actor) {
   if (actor.role === 'admin') return;
   if (!payment.userId || String(payment.userId) !== String(actor._id)) {
@@ -246,7 +252,7 @@ export async function initiateBookingDepositPayment({
     checkout = await yoco.createCheckout({
       amountCents: doc.amountCents,
       currency: doc.currency,
-      successUrl: `${env.CLIENT_URL}/booking/confirmation?appointmentId=${appointment._id}`,
+      successUrl: `${API_BASE_URL}/api/payments/redirect/${appointment._id}`,
       cancelUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=cancelled`,
       failureUrl: `${env.CLIENT_URL}/booking/payment?appointmentId=${appointment._id}&status=failed`,
       metadata: { paymentId: String(insertedId) },

@@ -199,19 +199,27 @@ router.get('/:id', authenticate, async (req, res, next) => {
 });
 
 // Powers the booking-confirmation page's post-payment poll — for both a logged-in
-// customer AND a guest, so it uses the same owner/admin/unclaimed-guest-booking access
-// check as payments.js's checkout initiation, not authenticate (a guest has no account to
-// authenticate with). Before returning the appointment, asks Yoco directly whether the
-// payment actually completed (paymentsService.reconcilePendingPayment) — a fallback for
-// when the webhook that should have confirmed it was lost, delayed, or rejected. Rate
-// limited same as checkout: it makes a real outbound call to Yoco each time.
+// customer AND a guest, so it uses optionalAuthenticate, not authenticate (a guest has no
+// account to authenticate with). Before returning the appointment, asks Yoco directly
+// whether the payment actually completed (paymentsService.reconcilePendingPayment) — a
+// fallback for when the webhook that should have confirmed it was lost, delayed, or
+// rejected. Rate limited same as checkout: it makes a real outbound call to Yoco each
+// time.
+//
+// Only blocks a DIFFERENT logged-in user from viewing someone else's booking — it does
+// NOT require the owner's own session to still be valid. Found via a real customer whose
+// login session was lost returning from Yoco's redirect (no refresh-token cookie came
+// back with the browser — a real, separately-tracked bug), which left optionalAuthenticate
+// unable to identify them, even though their payment had already been confirmed behind
+// the scenes. Treating a missing session the same as an unclaimed guest booking — rather
+// than locking the appointment's rightful owner out of their own confirmation page — is
+// the same ID-as-bearer-token model payments.js's redirect route already uses (an
+// appointment ID isn't guessable ahead of a real checkout).
 router.post('/:id/check-payment', optionalAuthenticate, checkoutLimiter, async (req, res, next) => {
   try {
     const appointment = await bookingService.getAppointment(req.params.id);
-    const isOwner = appointment.userId && req.user && String(appointment.userId) === String(req.user._id);
-    const isAdmin = req.user?.role === ROLES.ADMIN;
-    const isUnclaimedGuestBooking = !appointment.userId && !req.user;
-    if (!isOwner && !isAdmin && !isUnclaimedGuestBooking) return next(forbidden());
+    const isMismatchedLoggedInUser = req.user && req.user.role !== ROLES.ADMIN && String(appointment.userId) !== String(req.user._id);
+    if (isMismatchedLoggedInUser) return next(forbidden());
 
     await paymentsService.reconcilePendingPayment({ appointmentId: appointment._id });
     res.json({ appointment: await bookingService.getAppointment(req.params.id) });

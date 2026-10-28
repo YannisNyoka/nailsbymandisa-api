@@ -402,11 +402,15 @@ describe('POST /api/appointments/:id/check-payment', () => {
     expect(res.body.appointment._id).toBe(appointment._id);
   });
 
-  it("rejects an anonymous caller checking a logged-in customer's appointment", async () => {
+  it("lets an anonymous caller (no/lost session) check a logged-in customer's own appointment", async () => {
+    // The owner's own session can be lost returning from Yoco's redirect (e.g. a dropped
+    // refresh-token cookie) — this must not lock them out of their own confirmation page.
+    // Only a DIFFERENT logged-in user is blocked (see the next test).
     const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
     const appointment = await ownedAppointment(userId);
     const res = await request(app).post(`/api/appointments/${appointment._id}/check-payment`);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.body.appointment._id).toBe(String(appointment._id));
   });
 
   it('lets the owner check their own appointment', async () => {

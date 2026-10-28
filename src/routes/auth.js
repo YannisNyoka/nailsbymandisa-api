@@ -4,43 +4,8 @@ import * as authService from '../services/authService.js';
 import { validate } from '../middleware/validate.js';
 import { authenticate } from '../middleware/auth.js';
 import { authLimiter, refreshLimiter, passwordResetLimiter } from '../middleware/rateLimit.js';
-import { isProd, env } from '../config/env.js';
-import { parseDurationMs } from '../utils/duration.js';
 
 export const router = Router();
-
-const REFRESH_COOKIE = 'refreshToken';
-const REFRESH_COOKIE_PATH = '/api/auth';
-const REFRESH_TTL_MS = parseDurationMs(env.JWT_REFRESH_TTL);
-
-// Exported so it's independently testable without simulating a full production env
-// bootstrap (env.js requires SENTRY_DSN etc. once NODE_ENV=production). The frontend
-// (Vercel) and this API (Render) are on different domains in production, so every
-// refresh call is a genuine cross-site fetch — a SameSite=Lax cookie is only sent on
-// top-level navigations, never on a background fetch/XHR, so it silently never reached
-// the API here and every reload looked like a logout. 'none' requires secure:true
-// (browsers reject it otherwise), which isProdFlag already guarantees when true. Local
-// dev keeps 'lax': localhost:5173 and localhost:4000 count as the same site (SameSite
-// ignores port), so Lax already works there without this.
-export function refreshCookieAttributes(isProdFlag) {
-  return { secure: isProdFlag, sameSite: isProdFlag ? 'none' : 'lax' };
-}
-
-function setRefreshCookie(res, token) {
-  res.cookie(REFRESH_COOKIE, token, {
-    httpOnly: true,
-    ...refreshCookieAttributes(isProd),
-    path: REFRESH_COOKIE_PATH,
-    maxAge: REFRESH_TTL_MS,
-  });
-}
-
-function clearRefreshCookie(res) {
-  // Must match the attributes the cookie was actually set with (secure/sameSite
-  // included) — a browser can otherwise fail to recognize this as the same cookie and
-  // leave the real one (particularly a SameSite=None one) behind after logout.
-  res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH, ...refreshCookieAttributes(isProd) });
-}
 
 const passwordSchema = z.string().min(10, 'Password must be at least 10 characters.');
 
@@ -56,8 +21,7 @@ const registerSchema = z.object({
 router.post('/register', authLimiter, validate(registerSchema), async (req, res, next) => {
   try {
     const { user, accessToken, refreshToken, welcomeDiscountCode } = await authService.register(req.body);
-    setRefreshCookie(res, refreshToken);
-    res.status(201).json({ user, accessToken, welcomeDiscountCode });
+    res.status(201).json({ user, accessToken, refreshToken, welcomeDiscountCode });
   } catch (err) {
     next(err);
   }
@@ -71,30 +35,36 @@ const loginSchema = z.object({
 router.post('/login', authLimiter, validate(loginSchema), async (req, res, next) => {
   try {
     const { user, accessToken, refreshToken } = await authService.login(req.body);
-    setRefreshCookie(res, refreshToken);
-    res.json({ user, accessToken });
+    res.json({ user, accessToken, refreshToken });
   } catch (err) {
     next(err);
   }
 });
 
-router.post('/refresh', refreshLimiter, async (req, res, next) => {
+// Took the refresh token itself in an httpOnly cookie rather than here, until a real
+// repro showed mobile browsers (Samsung Internet's default cross-site-cookie block among
+// them) silently refusing to store or send a cookie set by a different domain than the
+// one the user is browsing (Vercel frontend, Render API) — every page reload looked like
+// a logout, with no way to detect or recover from it client-side. The frontend now holds
+// this token itself (its own origin's storage, not a cookie) and presents it explicitly,
+// which no cross-site cookie policy has any say over. Trades away httpOnly's
+// JS-can-never-read-it protection for that reliability.
+const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+
+router.post('/refresh', refreshLimiter, validate(refreshSchema), async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies?.[REFRESH_COOKIE];
-    const { user, accessToken, refreshToken } = await authService.refresh({ rawRefreshToken });
-    setRefreshCookie(res, refreshToken);
-    res.json({ user, accessToken });
+    const { user, accessToken, refreshToken } = await authService.refresh({ rawRefreshToken: req.body.refreshToken });
+    res.json({ user, accessToken, refreshToken });
   } catch (err) {
-    clearRefreshCookie(res);
     next(err);
   }
 });
 
-router.post('/logout', async (req, res, next) => {
+const logoutSchema = z.object({ refreshToken: z.string().min(1).optional() });
+
+router.post('/logout', validate(logoutSchema), async (req, res, next) => {
   try {
-    const rawRefreshToken = req.cookies?.[REFRESH_COOKIE];
-    await authService.logout({ rawRefreshToken });
-    clearRefreshCookie(res);
+    if (req.body.refreshToken) await authService.logout({ rawRefreshToken: req.body.refreshToken });
     res.status(204).end();
   } catch (err) {
     next(err);
@@ -137,7 +107,6 @@ router.post('/change-password', authenticate, authLimiter, validate(changePasswo
       currentPassword: req.body.currentPassword,
       newPassword: req.body.newPassword,
     });
-    clearRefreshCookie(res);
     res.status(204).end();
   } catch (err) {
     next(err);

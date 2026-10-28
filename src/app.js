@@ -2,7 +2,6 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
-import cookieParser from 'cookie-parser';
 import pinoHttp from 'pino-http';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
@@ -30,7 +29,6 @@ export function createApp() {
   );
 
   app.use(compression());
-  app.use(cookieParser());
   app.use(pinoHttp({ logger }));
 
   // Stripe/Yoco-style webhooks need the raw body for signature verification — mounted

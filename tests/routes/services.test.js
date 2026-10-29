@@ -13,7 +13,7 @@ beforeEach(() => {
 
 const sampleService = {
   name: 'Gel manicure',
-  category: 'gel',
+  category: 'gel_manicure',
   durationMinutes: 60,
   priceCents: 35000,
 };

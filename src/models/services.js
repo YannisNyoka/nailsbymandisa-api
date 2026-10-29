@@ -2,16 +2,13 @@ import { getDb } from '../config/db.js';
 
 export const COLLECTION = 'services';
 
-// PLACEHOLDER category vocabulary — adjust to the salon's real menu structure.
 export const SERVICE_CATEGORIES = Object.freeze([
-  'manicure',
+  'acrylic_manicure',
+  'gel_manicure',
+  'combo_services',
   'pedicure',
-  'gel',
-  'acrylic',
-  'polygel',
   'nail_art',
-  'soak_off',
-  'extensions',
+  'add_ons',
 ]);
 
 export const servicesJsonSchema = {

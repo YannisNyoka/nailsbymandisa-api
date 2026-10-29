@@ -15,7 +15,7 @@ export async function createTestService(overrides = {}) {
   const doc = {
     name: 'Gel manicure',
     description: null,
-    category: 'gel',
+    category: 'gel_manicure',
     durationMinutes: 60,
     priceCents: 35000,
     isActive: true,

@@ -328,13 +328,18 @@ export async function getAppointment(id) {
 
 // §4.3 — reschedule/cancel windows are enforced server-side, not just as UI copy.
 // Admins bypass both windows (they're the ones granting the exception on request).
-export async function rescheduleAppointment({ appointmentId, date, startTime, actor }) {
+// employeeId (reassigning staff) and notes are admin-only — a customer's own reschedule
+// flow never sends them, but this function is shared between both callers, so it guards
+// explicitly rather than trusting the route layer alone.
+export async function rescheduleAppointment({ appointmentId, date, startTime, employeeId, notes, actor }) {
   const appointment = await getAppointment(appointmentId);
   assertOwnerOrAdmin(appointment, actor);
 
   if (!LIVE_STATUSES.includes(appointment.status)) {
     throw badRequest('Only pending or confirmed appointments can be rescheduled.');
   }
+
+  if ((employeeId || notes !== undefined) && actor.role !== 'admin') throw forbidden();
 
   if (actor.role !== 'admin') {
     const settings = await getSettings();
@@ -347,9 +352,11 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, ac
     }
   }
 
+  const targetEmployeeId = employeeId ? new ObjectId(employeeId) : appointment.employeeId;
+
   const quote = await quoteBooking({ serviceIds: appointment.serviceIds, date, startTime });
   const check = await checkSlotBookable({
-    employeeId: appointment.employeeId,
+    employeeId: targetEmployeeId,
     date,
     startTime,
     endTime: quote.endTime,
@@ -365,8 +372,10 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, ac
           date,
           startTime,
           endTime: quote.endTime,
+          employeeId: targetEmployeeId,
           totalPriceCents: quote.totalPriceCents,
           isOffPeak: quote.isOffPeak,
+          ...(notes !== undefined ? { notes } : {}),
           updatedAt: new Date(),
         },
       }
@@ -377,6 +386,33 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, ac
     }
     throw err;
   }
+
+  return getAppointment(appointmentId);
+}
+
+// Admin-only: marks a confirmed booking completed right away, once the stylist has
+// actually rendered the service — rather than only ever waiting on
+// completeDuePastAppointments' cron sweep, which only fires once the slot's scheduled end
+// time has passed.
+export async function completeAppointment({ appointmentId, actor }) {
+  if (actor.role !== 'admin') throw forbidden();
+  const appointment = await getAppointment(appointmentId);
+
+  if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
+    throw badRequest('Only a confirmed appointment can be marked completed.');
+  }
+
+  await appointmentsCollection().updateOne(
+    { _id: appointment._id },
+    { $set: { status: APPOINTMENT_STATUS.COMPLETED, completedAt: new Date(), updatedAt: new Date() } }
+  );
+
+  await logActivity({
+    type: 'booking_completed',
+    message: `Booking on ${appointment.date} at ${appointment.startTime} marked completed by admin`,
+    actorUserId: actor._id,
+    metadata: { appointmentId: String(appointment._id) },
+  });
 
   return getAppointment(appointmentId);
 }

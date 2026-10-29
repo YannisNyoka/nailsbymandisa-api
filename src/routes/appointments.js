@@ -228,7 +228,15 @@ router.post('/:id/check-payment', optionalAuthenticate, checkoutLimiter, async (
   }
 });
 
-const rescheduleSchema = z.object({ date: dateSchema, startTime: timeSchema });
+const rescheduleSchema = z.object({
+  date: dateSchema,
+  startTime: timeSchema,
+  // Admin-only (bookingService.rescheduleAppointment rejects these from a non-admin) —
+  // optional so the existing customer-facing reschedule flow, which never sends them,
+  // keeps working unchanged.
+  employeeId: z.string().optional(),
+  notes: z.string().max(1000).nullable().optional(),
+});
 
 router.post('/:id/reschedule', authenticate, validate(rescheduleSchema), async (req, res, next) => {
   try {
@@ -236,8 +244,19 @@ router.post('/:id/reschedule', authenticate, validate(rescheduleSchema), async (
       appointmentId: req.params.id,
       date: req.body.date,
       startTime: req.body.startTime,
+      employeeId: req.body.employeeId,
+      notes: req.body.notes,
       actor: req.user,
     });
+    res.json({ appointment });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/complete', authenticate, async (req, res, next) => {
+  try {
+    const appointment = await bookingService.completeAppointment({ appointmentId: req.params.id, actor: req.user });
     res.json({ appointment });
   } catch (err) {
     next(err);

@@ -562,6 +562,123 @@ describe('bookingService.rescheduleAppointment', () => {
       })
     ).rejects.toMatchObject({ statusCode: 409 });
   });
+
+  it('lets an admin reassign staff and edit notes', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const originalEmployee = await createTestEmployee();
+    const newEmployee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(originalEmployee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const edited = await bookingService.rescheduleAppointment({
+      appointmentId: appointment._id,
+      date: DATE,
+      startTime: '10:00',
+      employeeId: String(newEmployee._id),
+      notes: 'Client prefers short nails.',
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+    });
+
+    expect(String(edited.employeeId)).toBe(String(newEmployee._id));
+    expect(edited.notes).toBe('Client prefers short nails.');
+  });
+
+  it('rejects a non-admin trying to reassign staff or edit notes', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+    const otherEmployee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    await expect(
+      bookingService.rescheduleAppointment({
+        appointmentId: appointment._id,
+        date: DATE,
+        startTime: '10:00',
+        employeeId: String(otherEmployee._id),
+        actor: await bookingActor(userId),
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+});
+
+describe('bookingService.completeAppointment', () => {
+  it('marks a confirmed appointment completed', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await confirmDirectly(appointment._id);
+
+    const completed = await bookingService.completeAppointment({
+      appointmentId: appointment._id,
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+    });
+
+    expect(completed.status).toBe('completed');
+    expect(completed.completedAt).toBeTruthy();
+  });
+
+  it('rejects a non-admin', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await confirmDirectly(appointment._id);
+
+    await expect(
+      bookingService.completeAppointment({ appointmentId: appointment._id, actor: await bookingActor(userId) })
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('rejects an appointment that is not confirmed', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    await expect(
+      bookingService.completeAppointment({
+        appointmentId: appointment._id,
+        actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
 });
 
 describe('bookingService.listAvailableSlots', () => {

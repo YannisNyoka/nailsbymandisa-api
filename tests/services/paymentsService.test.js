@@ -232,6 +232,69 @@ describe('paymentsService.initiateBookingDepositPayment', () => {
   });
 });
 
+describe('paymentsService.recordManualPayment — admin cash/in-person payment', () => {
+  it('records a deposit cash payment and confirms the booking', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+
+    const paymentId = await paymentsService.recordManualPayment({
+      appointmentId: appointment._id,
+      amount: 'deposit',
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+    });
+
+    const confirmed = await bookingService.getAppointment(appointment._id);
+    expect(confirmed.status).toBe('confirmed');
+    expect(String(confirmed.paymentId)).toBe(String(paymentId));
+
+    const payment = await paymentsCollection().findOne({ _id: paymentId });
+    expect(payment.status).toBe('paid');
+    expect(payment.method).toBe('cash');
+    expect(payment.amountCents).toBe(appointment.depositCents);
+  });
+
+  it('records a full cash payment for the total price', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+
+    const paymentId = await paymentsService.recordManualPayment({
+      appointmentId: appointment._id,
+      amount: 'full',
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+    });
+
+    const payment = await paymentsCollection().findOne({ _id: paymentId });
+    expect(payment.amountCents).toBe(appointment.totalPriceCents);
+  });
+
+  it('rejects a non-admin', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+
+    await expect(
+      paymentsService.recordManualPayment({
+        appointmentId: appointment._id,
+        amount: 'deposit',
+        actor: { _id: userId, role: ROLES.CUSTOMER },
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('rejects an appointment that is not awaiting payment', async () => {
+    const userId = new ObjectId();
+    const appointment = await bookAppointment({ userId });
+    await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: { status: 'confirmed' } });
+
+    await expect(
+      paymentsService.recordManualPayment({
+        appointmentId: appointment._id,
+        amount: 'deposit',
+        actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
 describe('paymentsService.handlePaymentSucceeded — webhook idempotency', () => {
   it('confirms the appointment and marks the payment paid exactly once', async () => {
     const userId = new ObjectId();

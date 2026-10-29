@@ -40,6 +40,31 @@ router.post(
   }
 );
 
+const recordCashSchema = z.object({ amount: z.enum(['deposit', 'full']) });
+
+// Admin-only cash/in-person payment recording — e.g. a walk-in, or a booking the admin
+// made on a client's behalf who pays on the spot, neither of which goes through Yoco at
+// all. Same authenticate-only + actor.role==='admin' pattern as the other admin
+// appointment actions (reschedule/cancel/complete in routes/appointments.js), not a
+// dedicated permission check.
+router.post(
+  '/appointments/:appointmentId/record-cash',
+  authenticate,
+  validate(recordCashSchema),
+  async (req, res, next) => {
+    try {
+      await paymentsService.recordManualPayment({
+        appointmentId: req.params.appointmentId,
+        amount: req.body.amount,
+        actor: req.user,
+      });
+      res.status(201).json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Yoco's success redirect lands here first, not straight on the frontend (see
 // paymentsService.js's API_BASE_URL/successUrl) — this runs the same Yoco-backed
 // reconciliation the confirmation page itself polls, but synchronously, before the

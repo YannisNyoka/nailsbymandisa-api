@@ -56,6 +56,26 @@ describe('POST /api/payments/appointments/:appointmentId/checkout', () => {
   });
 });
 
+describe('POST /api/payments/appointments/:appointmentId/record-cash', () => {
+  it('rejects a non-admin', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const res = await request(app)
+      .post(`/api/payments/appointments/${new ObjectId()}/record-cash`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ amount: 'deposit' });
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an invalid amount value', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [] });
+    const res = await request(app)
+      .post(`/api/payments/appointments/${new ObjectId()}/record-cash`)
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ amount: 'not-a-real-option' });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /api/payments/:id/refund', () => {
   it('rejects a non-admin', async () => {
     const { accessToken } = await createUserAndToken({ role: ROLES.CUSTOMER });

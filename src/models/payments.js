@@ -47,6 +47,9 @@ export const paymentsJsonSchema = {
       amountCents: { bsonType: 'int', minimum: 0 },
       currency: { bsonType: 'string' },
       status: { enum: Object.values(PAYMENT_STATUS) },
+      // Absent on every payment created before this field existed — always treat a
+      // missing value as 'yoco' (the only way a payment could be created until now).
+      method: { enum: ['yoco', 'cash'] },
       yocoCheckoutId: { bsonType: ['string', 'null'] },
       yocoPaymentId: { bsonType: ['string', 'null'] },
       redirectUrl: { bsonType: ['string', 'null'] },

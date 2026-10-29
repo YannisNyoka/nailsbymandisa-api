@@ -513,6 +513,62 @@ async function confirmAppointmentForPaidDeposit(updated) {
   });
 }
 
+// Admin-only: records a cash/in-person payment (e.g. a walk-in, or an admin booking on
+// behalf of a client who pays on the spot) and confirms the booking — the same
+// confirmation path (slot re-check, notification, loyalty points, activity log) a real
+// Yoco payment goes through, reused as-is rather than duplicated, just starting from a
+// payment that's already PAID instead of one a webhook/poll transitions into that state.
+export async function recordManualPayment({ appointmentId, amount, actor }) {
+  if (actor.role !== 'admin') throw forbidden();
+  const appointment = await appointmentsCollection().findOne({ _id: new ObjectId(appointmentId) });
+  if (!appointment) throw notFound('Appointment');
+  if (appointment.status !== APPOINTMENT_STATUS.PENDING_PAYMENT) {
+    throw badRequest('Only a booking still awaiting payment can be recorded as paid.');
+  }
+
+  const amountCents = amount === 'full' ? appointment.totalPriceCents : appointment.depositCents;
+
+  const now = new Date();
+  const doc = {
+    purpose: PAYMENT_PURPOSE.BOOKING_DEPOSIT,
+    appointmentId: appointment._id,
+    giftCardId: null,
+    userId: appointment.userId,
+    guestEmail: appointment.guestInfo?.email ?? null,
+    amountCents,
+    originalAmountCents: amountCents,
+    currency: 'ZAR',
+    status: PAYMENT_STATUS.PAID,
+    method: 'cash',
+    yocoCheckoutId: null,
+    yocoPaymentId: null,
+    redirectUrl: null,
+    pointsRedeemed: 0,
+    redemptionValueCents: 0,
+    discountCode: null,
+    discountValueCents: 0,
+    giftCardCode: null,
+    giftCardValueCents: 0,
+    refunds: [],
+    refundedAmountCents: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const { insertedId } = await paymentsCollection().insertOne(doc);
+  const inserted = { ...doc, _id: insertedId };
+
+  await confirmAppointmentForPaidDeposit(inserted);
+
+  await logActivity({
+    type: 'payment_received',
+    message: `Cash payment of R${(amountCents / 100).toFixed(2)} recorded by admin for booking on ${appointment.date} at ${appointment.startTime}`,
+    actorUserId: actor._id,
+    metadata: { paymentId: String(insertedId), appointmentId: String(appointment._id) },
+  });
+
+  return insertedId;
+}
+
 // §4.4/§6.1 — the core idempotency guarantee: this findOneAndUpdate only succeeds the
 // FIRST time a given payment transitions out of "pending". A redelivered webhook for an
 // already-processed event finds no matching document and is a silent no-op — it can

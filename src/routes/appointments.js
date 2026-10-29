@@ -235,6 +235,7 @@ const rescheduleSchema = z.object({
   // optional so the existing customer-facing reschedule flow, which never sends them,
   // keeps working unchanged.
   employeeId: z.string().optional(),
+  serviceIds: z.array(z.string()).min(1).optional(),
   notes: z.string().max(1000).nullable().optional(),
 });
 
@@ -245,6 +246,7 @@ router.post('/:id/reschedule', authenticate, validate(rescheduleSchema), async (
       date: req.body.date,
       startTime: req.body.startTime,
       employeeId: req.body.employeeId,
+      serviceIds: req.body.serviceIds,
       notes: req.body.notes,
       actor: req.user,
     });

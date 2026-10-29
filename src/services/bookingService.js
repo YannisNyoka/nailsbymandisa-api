@@ -328,10 +328,13 @@ export async function getAppointment(id) {
 
 // §4.3 — reschedule/cancel windows are enforced server-side, not just as UI copy.
 // Admins bypass both windows (they're the ones granting the exception on request).
-// employeeId (reassigning staff) and notes are admin-only — a customer's own reschedule
-// flow never sends them, but this function is shared between both callers, so it guards
-// explicitly rather than trusting the route layer alone.
-export async function rescheduleAppointment({ appointmentId, date, startTime, employeeId, notes, actor }) {
+// employeeId (reassigning staff), notes and serviceIds are admin-only — a customer's own
+// reschedule flow never sends them, but this function is shared between both callers, so
+// it guards explicitly rather than trusting the route layer alone. Changing serviceIds
+// recomputes totalPriceCents, but never depositCents — that's a flat setting
+// (settings.bookingDepositCents), not derived from the services chosen (see
+// quoteBooking), so it doesn't shift under an already-paid deposit.
+export async function rescheduleAppointment({ appointmentId, date, startTime, employeeId, serviceIds, notes, actor }) {
   const appointment = await getAppointment(appointmentId);
   assertOwnerOrAdmin(appointment, actor);
 
@@ -339,7 +342,7 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, em
     throw badRequest('Only pending or confirmed appointments can be rescheduled.');
   }
 
-  if ((employeeId || notes !== undefined) && actor.role !== 'admin') throw forbidden();
+  if ((employeeId || serviceIds || notes !== undefined) && actor.role !== 'admin') throw forbidden();
 
   if (actor.role !== 'admin') {
     const settings = await getSettings();
@@ -353,8 +356,9 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, em
   }
 
   const targetEmployeeId = employeeId ? new ObjectId(employeeId) : appointment.employeeId;
+  const targetServiceIds = serviceIds ?? appointment.serviceIds;
 
-  const quote = await quoteBooking({ serviceIds: appointment.serviceIds, date, startTime });
+  const quote = await quoteBooking({ serviceIds: targetServiceIds, date, startTime });
   const check = await checkSlotBookable({
     employeeId: targetEmployeeId,
     date,
@@ -373,6 +377,8 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, em
           startTime,
           endTime: quote.endTime,
           employeeId: targetEmployeeId,
+          serviceIds: serviceIds ? serviceIds.map((id) => new ObjectId(id)) : appointment.serviceIds,
+          totalDurationMinutes: quote.totalDurationMinutes,
           totalPriceCents: quote.totalPriceCents,
           isOffPeak: quote.isOffPeak,
           ...(notes !== undefined ? { notes } : {}),

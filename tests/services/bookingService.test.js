@@ -702,6 +702,35 @@ describe('bookingService.listAvailableSlots', () => {
     expect(slots).toContain('10:00');
   });
 
+  it('excludeAppointmentId leaves that appointment\'s own slot out of the conflict check, powering the admin edit modal', async () => {
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(new ObjectId()),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: { status: 'confirmed' } });
+
+    const withoutExclude = await bookingService.listAvailableSlots({
+      serviceIds: [String(service._id)],
+      date: DATE,
+      employeeId: String(employee._id),
+    });
+    expect(withoutExclude).not.toContain('10:00');
+
+    const withExclude = await bookingService.listAvailableSlots({
+      serviceIds: [String(service._id)],
+      date: DATE,
+      employeeId: String(employee._id),
+      excludeAppointmentId: appointment._id,
+    });
+    expect(withExclude).toContain('10:00');
+  });
+
   it('returns no slots at all for a date whose month the admin has locked', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const employee = await createTestEmployee();

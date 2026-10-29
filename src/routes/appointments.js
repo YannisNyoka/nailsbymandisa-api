@@ -25,12 +25,16 @@ const slotsQuerySchema = z.object({
   serviceIds: idListSchema,
   date: dateSchema,
   employeeId: z.string().optional(),
+  // Lets the admin edit modal ask "what's open, pretending this appointment's own current
+  // slot doesn't exist" — otherwise editing just the staff/services on an already-booked
+  // slot would show that same slot as unavailable against itself.
+  excludeAppointmentId: z.string().optional(),
 });
 
 router.get('/slots', validate(slotsQuerySchema, 'query'), async (req, res, next) => {
   try {
-    const { serviceIds, date, employeeId } = req.query;
-    const slots = await bookingService.listAvailableSlots({ serviceIds, date, employeeId });
+    const { serviceIds, date, employeeId, excludeAppointmentId } = req.query;
+    const slots = await bookingService.listAvailableSlots({ serviceIds, date, employeeId, excludeAppointmentId });
     res.json({ slots });
   } catch (err) {
     next(err);

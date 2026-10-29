@@ -478,7 +478,7 @@ export async function cancelAppointment({ appointmentId, actor, reason }) {
 // employee (not once per candidate slot) and evaluates every SLOT_GRANULARITY_MINUTES
 // candidate in-memory via the same evaluateSlot() rule createAppointment ultimately
 // checks against — batched per §6.3, not diverging per §6.2.
-export async function listAvailableSlots({ serviceIds, date, employeeId }) {
+export async function listAvailableSlots({ serviceIds, date, employeeId, excludeAppointmentId }) {
   const quote = await quoteBooking({ serviceIds, date, startTime: '00:00' });
   const durationMinutes = quote.totalDurationMinutes;
 
@@ -513,7 +513,7 @@ export async function listAvailableSlots({ serviceIds, date, employeeId }) {
         t = addMinutesToTime(t, SLOT_GRANULARITY_MINUTES)
       ) {
         const endTime = addMinutesToTime(t, durationMinutes);
-        const result = evaluateSlot({ employee, date, startTime: t, endTime, blocksForDay, appointmentsForDay });
+        const result = evaluateSlot({ employee, date, startTime: t, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId });
         if (result.bookable) slotsByTime.add(t);
       }
     }

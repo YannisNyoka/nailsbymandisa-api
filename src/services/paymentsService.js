@@ -13,7 +13,8 @@ import { getSettings } from './settingsService.js';
 import { validateDiscountCode, redeemDiscountCode, unredeemDiscountCode } from './discountsService.js';
 import * as giftCardsService from './giftCardsService.js';
 import { sendMail } from '../config/mailer.js';
-import { env } from '../config/env.js';
+import { getClient } from '../config/db.js';
+import { env, isTest } from '../config/env.js';
 import {
   PAYMENT_STATUS,
   PAYMENT_PURPOSE,
@@ -390,56 +391,72 @@ export async function initiateGiftCardPurchase({ amountCents, purchaserUserId, p
 // the caller; this only runs the appointment-confirmation side effects and is itself
 // guarded by the appointment's own pending→confirmed transition, so it's safe even if
 // somehow invoked twice.
-async function confirmAppointmentForPaidDeposit(updated) {
-  // Late overlap re-check. The unique index the write below relies on only catches an
-  // identical startTime collision — two DIFFERENT-duration services can genuinely overlap
-  // (10:00-11:00 vs 10:30-11:30) without ever matching on that index, and the only
-  // earlier overlap check (checkSlotBookable, run once at the start of checkout) can be
-  // minutes stale by the time this webhook fires, since the customer sits on Yoco's
-  // payment page in between. Doing the overlap check again here, as the very last thing
-  // before the atomic status write, shrinks that window from minutes to milliseconds.
-  // It's not a single atomic operation with the write below — a fully airtight fix needs
-  // a multi-document transaction or a granular per-slot claim record spanning the whole
-  // booking lifecycle (create/cancel/reschedule/no-show), which is a materially bigger
-  // change than this targeted mitigation.
-  const pending = await appointmentsCollection().findOne({
-    _id: updated.appointmentId,
-    status: APPOINTMENT_STATUS.PENDING_PAYMENT,
-  });
-  if (pending) {
+// The critical section of confirming a paid deposit: "is there still no overlapping
+// confirmed booking, and is this appointment still pending_payment?" + "flip it to
+// confirmed" — done as one atomic unit via a real MongoDB transaction (Atlas is always a
+// replica set, so these are available), the same pattern bookingService.js's
+// writeConfirmedRescheduleAtomically uses for the equivalent race in reschedule. Replaces
+// what used to be a plain read-then-write (a late re-check, narrowing the race window to
+// milliseconds rather than closing it) — now a second payment confirming for a genuinely
+// overlapping slot in the same instant can't both succeed, not just rarely both succeed.
+// The exact-startTime unique index is still the final backstop underneath this (caught in
+// confirmAppointmentForPaidDeposit's try/catch below) — kept as defense in depth, not
+// because this transaction is expected to miss it.
+//
+// Side effects (cancelling a now-unviable appointment, activity logging, confirmation
+// email, notifications, loyalty points) deliberately stay OUTSIDE this function, in
+// confirmAppointmentForPaidDeposit below — they're not something a DB transaction should
+// wrap (don't want an email send retried because MongoDB internally retried the
+// transaction), and cancelling a pending appointment that's genuinely not viable is safe
+// to do non-atomically regardless of timing (a pending appointment never blocks anyone
+// either way).
+//
+// Skipped under NODE_ENV=test: the fake in-memory db is single-threaded and synchronous
+// (no real concurrency to race), and has no session/transaction API to match.
+async function tryConfirmPendingAppointment(updated) {
+  async function readAndWrite(session) {
+    const options = session ? { session } : undefined;
+    const pending = await appointmentsCollection().findOne(
+      { _id: updated.appointmentId, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
+      options
+    );
+    if (!pending) return { outcome: 'not_pending' };
+
     const confirmedForEmployee = await (
-      await appointmentsCollection().find({
-        employeeId: pending.employeeId,
-        date: pending.date,
-        status: APPOINTMENT_STATUS.CONFIRMED,
-      })
+      await appointmentsCollection().find(
+        { employeeId: pending.employeeId, date: pending.date, status: APPOINTMENT_STATUS.CONFIRMED },
+        options
+      )
     ).toArray();
     const overlapping = confirmedForEmployee.find((a) => timeRangesOverlap(pending.startTime, pending.endTime, a.startTime, a.endTime));
-    if (overlapping) {
-      await cancelUnviableAppointment(pending, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
-      await logActivity({
-        type: 'payment_needs_review',
-        message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for an overlapping slot by the time it processed. Needs manual refund.`,
-        actorUserId: pending.userId ?? null,
-        metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
-      });
-      return;
-    }
+    if (overlapping) return { outcome: 'overlap', pending };
+
+    const appointment = await appointmentsCollection().findOneAndUpdate(
+      { _id: updated.appointmentId, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
+      { $set: { status: APPOINTMENT_STATUS.CONFIRMED, paymentId: updated._id, autoExpireAt: null, updatedAt: new Date() } },
+      options
+    );
+    return { outcome: 'confirmed', appointment };
   }
 
-  let appointment;
+  if (isTest) return readAndWrite(null);
+
+  const session = getClient().startSession();
   try {
-    appointment = await appointmentsCollection().findOneAndUpdate(
-      { _id: updated.appointmentId, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
-      {
-        $set: {
-          status: APPOINTMENT_STATUS.CONFIRMED,
-          paymentId: updated._id,
-          autoExpireAt: null,
-          updatedAt: new Date(),
-        },
-      }
-    );
+    let result;
+    await session.withTransaction(async () => {
+      result = await readAndWrite(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function confirmAppointmentForPaidDeposit(updated) {
+  let result;
+  try {
+    result = await tryConfirmPendingAppointment(updated);
   } catch (err) {
     if (err.code !== DUPLICATE_KEY_ERROR_CODE) throw err;
     // Only a paid appointment holds its slot, so two customers can each be mid-checkout
@@ -461,7 +478,8 @@ async function confirmAppointmentForPaidDeposit(updated) {
     });
     return;
   }
-  if (!appointment) {
+
+  if (result.outcome === 'not_pending') {
     // The initiate-checkout guard above should catch a slot that's already gone before
     // the customer ever reaches Yoco, but this webhook is the source of truth for "did
     // they pay" and can't be skipped — so if the appointment stopped being
@@ -478,6 +496,19 @@ async function confirmAppointmentForPaidDeposit(updated) {
     });
     return;
   }
+
+  if (result.outcome === 'overlap') {
+    await cancelUnviableAppointment(result.pending, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
+    await logActivity({
+      type: 'payment_needs_review',
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for an overlapping slot by the time it processed. Needs manual refund.`,
+      actorUserId: result.pending.userId ?? null,
+      metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
+    });
+    return;
+  }
+
+  const appointment = result.appointment;
 
   await sendBookingConfirmationEmail(appointment);
   if (appointment.userId) {
@@ -540,7 +571,10 @@ export async function recordManualPayment({ appointmentId, amount, actor }) {
     currency: 'ZAR',
     status: PAYMENT_STATUS.PAID,
     method: 'cash',
-    yocoCheckoutId: null,
+    // yocoCheckoutId deliberately omitted (not set to null) — it's unique+sparse, and an
+    // *explicit* null still counts as present for a sparse index, so only the very first
+    // cash payment ever would succeed; every one after it would collide. Found via a real
+    // repro: the second cash payment in this same verification run threw E11000.
     yocoPaymentId: null,
     redirectUrl: null,
     pointsRedeemed: 0,

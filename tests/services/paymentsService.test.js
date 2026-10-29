@@ -86,6 +86,26 @@ describe('payments — yocoCheckoutId uniqueness', () => {
     expect(first.yocoCheckoutId).toBe('checkout_a');
     expect(second.yocoCheckoutId).toBe('checkout_b');
   });
+
+  // Same regression, different code path — recordManualPayment (cash/in-person payments)
+  // had the exact same bug: an explicit `yocoCheckoutId: null` on every cash payment doc,
+  // which only let the very first cash payment ever succeed. Found via a real repro
+  // against the live database, not caught by the other recordManualPayment tests in this
+  // file because those don't register paymentsIndexes at all.
+  it('lets two cash payments be recorded back to back without colliding', async () => {
+    const userId1 = new ObjectId();
+    const userId2 = new ObjectId();
+    const appointment1 = await bookAppointment({ userId: userId1, startTime: '10:00' });
+    const appointment2 = await bookAppointment({ userId: userId2, startTime: '13:00' });
+    const admin = { _id: new ObjectId(), role: ROLES.ADMIN };
+
+    await expect(
+      paymentsService.recordManualPayment({ appointmentId: appointment1._id, amount: 'deposit', actor: admin })
+    ).resolves.toBeTruthy();
+    await expect(
+      paymentsService.recordManualPayment({ appointmentId: appointment2._id, amount: 'deposit', actor: admin })
+    ).resolves.toBeTruthy();
+  });
 });
 
 describe('paymentsService.initiateBookingDepositPayment', () => {

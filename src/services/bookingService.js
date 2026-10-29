@@ -3,6 +3,8 @@ import { appointmentsCollection, DUPLICATE_KEY_ERROR_CODE } from '../models/appo
 import { availabilityCollection } from '../models/availability.js';
 import { servicesCollection } from '../models/services.js';
 import { employeesCollection } from '../models/employees.js';
+import { getClient } from '../config/db.js';
+import { isTest } from '../config/env.js';
 import { getSettings } from './settingsService.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
@@ -328,6 +330,45 @@ export async function getAppointment(id) {
 
 // §4.3 — reschedule/cancel windows are enforced server-side, not just as UI copy.
 // Admins bypass both windows (they're the ones granting the exception on request).
+// Only called for an already-CONFIRMED appointment being moved — the one case that can
+// actually collide with another confirmed booking (SLOT_BLOCKING_STATUSES). rescheduleAppointment
+// already ran checkSlotBookable once above, but as a plain read-then-write that leaves a
+// window open for two near-simultaneous requests to each read "no conflict" before either
+// writes. A real MongoDB transaction (Atlas is always a replica set, so these are
+// available) closes that window instead of just narrowing it — the overlap re-check and
+// the write commit as one atomic unit, so a second transaction racing to commit an
+// overlapping write can't both succeed. Skipped under test (isTest): the fake in-memory
+// db has no real concurrency to race in the first place, and no session/transaction API
+// to match — exercising the plain check-then-write there still proves the logic itself is
+// correct, just not the atomicity, which nothing in a single-threaded synchronous fake
+// could actually demonstrate anyway.
+async function writeConfirmedRescheduleAtomically({ appointment, targetEmployeeId, date, startTime, endTime, updateDoc }) {
+  async function checkAndWrite(session) {
+    const options = session ? { session } : undefined;
+    const sameDayConfirmed = await (
+      await appointmentsCollection().find({ employeeId: targetEmployeeId, date, status: APPOINTMENT_STATUS.CONFIRMED }, options)
+    ).toArray();
+    const overlapping = sameDayConfirmed.find(
+      (a) => String(a._id) !== String(appointment._id) && timeRangesOverlap(startTime, endTime, a.startTime, a.endTime)
+    );
+    if (overlapping) throw conflict('This slot was just booked by someone else. Please choose another time.');
+
+    await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: updateDoc }, options);
+  }
+
+  if (isTest) {
+    await checkAndWrite(null);
+    return;
+  }
+
+  const session = getClient().startSession();
+  try {
+    await session.withTransaction(() => checkAndWrite(session));
+  } finally {
+    await session.endSession();
+  }
+}
+
 // employeeId (reassigning staff), notes and serviceIds are admin-only — a customer's own
 // reschedule flow never sends them, but this function is shared between both callers, so
 // it guards explicitly rather than trusting the route layer alone. Changing serviceIds
@@ -359,6 +400,11 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, em
   const targetServiceIds = serviceIds ?? appointment.serviceIds;
 
   const quote = await quoteBooking({ serviceIds: targetServiceIds, date, startTime });
+  // Covers everything (employee active, working hours, blocks, locked months, and a
+  // first overlap pass) with a specific, user-facing reason for each — the fast,
+  // common-case check. Only a CONFIRMED appointment can actually collide with another
+  // slot-holder (SLOT_BLOCKING_STATUSES), so only that case goes on to the transactional
+  // re-check below; a pending_payment appointment never needs it.
   const check = await checkSlotBookable({
     employeeId: targetEmployeeId,
     date,
@@ -368,24 +414,25 @@ export async function rescheduleAppointment({ appointmentId, date, startTime, em
   });
   if (!check.bookable) throw conflict(check.reason);
 
+  const updateDoc = {
+    date,
+    startTime,
+    endTime: quote.endTime,
+    employeeId: targetEmployeeId,
+    serviceIds: serviceIds ? serviceIds.map((id) => new ObjectId(id)) : appointment.serviceIds,
+    totalDurationMinutes: quote.totalDurationMinutes,
+    totalPriceCents: quote.totalPriceCents,
+    isOffPeak: quote.isOffPeak,
+    ...(notes !== undefined ? { notes } : {}),
+    updatedAt: new Date(),
+  };
+
   try {
-    await appointmentsCollection().updateOne(
-      { _id: appointment._id },
-      {
-        $set: {
-          date,
-          startTime,
-          endTime: quote.endTime,
-          employeeId: targetEmployeeId,
-          serviceIds: serviceIds ? serviceIds.map((id) => new ObjectId(id)) : appointment.serviceIds,
-          totalDurationMinutes: quote.totalDurationMinutes,
-          totalPriceCents: quote.totalPriceCents,
-          isOffPeak: quote.isOffPeak,
-          ...(notes !== undefined ? { notes } : {}),
-          updatedAt: new Date(),
-        },
-      }
-    );
+    if (appointment.status === APPOINTMENT_STATUS.CONFIRMED) {
+      await writeConfirmedRescheduleAtomically({ appointment, targetEmployeeId, date, startTime, endTime: quote.endTime, updateDoc });
+    } else {
+      await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: updateDoc });
+    }
   } catch (err) {
     if (err.code === DUPLICATE_KEY_ERROR_CODE) {
       throw conflict('This slot was just booked by someone else. Please choose another time.');

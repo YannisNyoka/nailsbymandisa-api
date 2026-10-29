@@ -563,6 +563,47 @@ describe('bookingService.rescheduleAppointment', () => {
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
+  it('rejects rescheduling a confirmed appointment into an overlapping (not identical) slot already confirmed by someone else', async () => {
+    // Both appointments are CONFIRMED here, so this specifically exercises
+    // writeConfirmedRescheduleAtomically's own overlap check (not just the earlier
+    // checkSlotBookable pre-check, which would also catch this but isn't what this test is
+    // about) — different start times (09:00 vs the 09:30 target below), so the unique
+    // index alone (date+employeeId+startTime) can't be what's rejecting it either.
+    const service = await createTestService({ durationMinutes: 60 });
+    const employee = await createTestEmployee();
+    const userA = new ObjectId();
+    const userB = new ObjectId();
+
+    const appointmentA = await bookingService.createAppointment({
+      userId: String(userA),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '09:00',
+    });
+    await confirmDirectly(appointmentA._id);
+    const appointmentB = await bookingService.createAppointment({
+      userId: String(userB),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '13:00',
+    });
+    await confirmDirectly(appointmentB._id);
+
+    await expect(
+      bookingService.rescheduleAppointment({
+        appointmentId: appointmentB._id,
+        date: DATE,
+        startTime: '09:30', // overlaps appointmentA's 09:00-10:00, but isn't identical to it
+        actor: await bookingActor(userB),
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    const unchanged = await bookingService.getAppointment(appointmentB._id);
+    expect(unchanged.startTime).toBe('13:00');
+  });
+
   it('lets an admin reassign staff and edit notes', async () => {
     const service = await createTestService({ durationMinutes: 60 });
     const originalEmployee = await createTestEmployee();

@@ -29,6 +29,16 @@ export function getDb() {
   return db;
 }
 
+// The raw MongoClient, for the rare operation that needs a real transaction (a session
+// is started from the client, not the Db) — see bookingService.js's reschedule overlap
+// guard. Everything else should keep using getDb()/the *Collection() helpers.
+export function getClient() {
+  if (!client) {
+    throw new Error('Database not connected — call connectDb() before getClient()');
+  }
+  return client;
+}
+
 export async function closeDb() {
   if (client) {
     await client.close();

@@ -11,6 +11,11 @@ export const CLIENT_NOTIFICATION_TYPES = Object.freeze([
   'payment_failed',
   'admin_message',
   'broadcast',
+  // Admin-facing only (never sent to a customer) — fired when a customer makes a new
+  // booking, so an admin with MANAGE_APPOINTMENTS sees it the same way a customer sees
+  // booking_confirmed, via this same collection/bell/API (no separate admin-notification
+  // system needed).
+  'new_booking',
 ]);
 
 export const clientNotificationsJsonSchema = {

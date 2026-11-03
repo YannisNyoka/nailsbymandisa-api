@@ -4,7 +4,7 @@ import { usersCollection } from '../models/users.js';
 import { notFound } from '../utils/AppError.js';
 import { sortByCreatedAtDesc } from '../utils/sorting.js';
 import { sendMail } from '../config/mailer.js';
-import { ROLES } from '../config/constants.js';
+import { ROLES, PERMISSIONS } from '../config/constants.js';
 
 export async function createClientNotification({ userId, type, title, body, link = null }) {
   const doc = {
@@ -74,6 +74,28 @@ export async function deleteAllForUser(userId) {
 // for the in-app side; email still has to go one-per-recipient (no bulk endpoint), but
 // sendMail() already logs-and-continues on a single failed address rather than throwing,
 // so one bad email can't stop the rest of the broadcast or the in-app notifications above.
+// Fired from bookingService.createAppointment whenever a customer (not an admin acting
+// on their behalf) makes a new booking — reuses the same bell/collection/API a customer's
+// own notifications go through, scoped to admins who actually manage appointments rather
+// than every admin regardless of what they're responsible for.
+export async function notifyAdminsOfNewBooking({ customerName, date, startTime }) {
+  const allAdmins = await (await usersCollection().find({ role: ROLES.ADMIN, isActive: true })).toArray();
+  const admins = allAdmins.filter((admin) => admin.permissions?.includes(PERMISSIONS.MANAGE_APPOINTMENTS));
+  if (admins.length === 0) return;
+  const now = new Date();
+  await clientNotificationsCollection().insertMany(
+    admins.map((admin) => ({
+      userId: admin._id,
+      type: 'new_booking',
+      title: 'New booking',
+      body: `${customerName} booked ${date} at ${startTime}.`,
+      link: '/admin/appointments',
+      isRead: false,
+      createdAt: now,
+    }))
+  );
+}
+
 export async function broadcastNotification({ title, body, link = null }) {
   const customers = await (await usersCollection().find({ role: ROLES.CUSTOMER, isActive: true })).toArray();
   if (customers.length === 0) return { sentCount: 0 };

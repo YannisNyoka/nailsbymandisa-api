@@ -3,10 +3,11 @@ import { appointmentsCollection, DUPLICATE_KEY_ERROR_CODE } from '../models/appo
 import { availabilityCollection } from '../models/availability.js';
 import { servicesCollection } from '../models/services.js';
 import { employeesCollection } from '../models/employees.js';
+import { usersCollection } from '../models/users.js';
 import { getClient } from '../config/db.js';
 import { isTest } from '../config/env.js';
 import { getSettings } from './settingsService.js';
-import { createClientNotification } from './clientNotificationsService.js';
+import { createClientNotification, notifyAdminsOfNewBooking } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
 import {
   APPOINTMENT_STATUS,
@@ -297,6 +298,19 @@ export async function createAppointment({ userId, guestInfo, employeeId, service
       actorUserId: createdByAdminId ?? userId ?? null,
       metadata: { appointmentId: String(insertedId) },
     });
+    // Only for a customer's own booking — an admin booking on a client's behalf already
+    // knows about it, so notifying them too would just be noise.
+    if (!createdByAdminId) {
+      let customerName = guestInfo?.name ?? 'A customer';
+      if (userId) {
+        const customer = await usersCollection().findOne(
+          { _id: new ObjectId(userId) },
+          { projection: { firstName: 1, lastName: 1 } }
+        );
+        if (customer) customerName = `${customer.firstName} ${customer.lastName}`;
+      }
+      await notifyAdminsOfNewBooking({ customerName, date, startTime });
+    }
     return { ...doc, _id: insertedId };
   } catch (err) {
     // Every new appointment is inserted as PENDING_PAYMENT, and the unique partial index

@@ -1,11 +1,13 @@
 import { setTestDb } from '../../src/config/db.js';
 import { createFakeDb } from '../helpers/fakeDb.js';
 import { createTestService, createTestEmployee, futureDateString } from '../helpers/fixtures.js';
+import { createUserAndToken } from '../helpers/testAuth.js';
 import * as bookingService from '../../src/services/bookingService.js';
 import * as settingsService from '../../src/services/settingsService.js';
 import { appointmentsCollection, appointmentsIndexes } from '../../src/models/appointments.js';
 import { availabilityCollection } from '../../src/models/availability.js';
-import { ROLES } from '../../src/config/constants.js';
+import { clientNotificationsCollection } from '../../src/models/clientNotifications.js';
+import { ROLES, PERMISSIONS } from '../../src/config/constants.js';
 import { todayDateString, nowTimeString, addMinutesToTime } from '../../src/utils/businessTime.js';
 import { ObjectId } from 'mongodb';
 
@@ -271,6 +273,63 @@ describe('bookingService.createAppointment — the shared slot-validation path',
 
     const results = await Promise.allSettled([attempt(), attempt()]);
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+  });
+});
+
+describe('bookingService.createAppointment — admin new-booking notifications', () => {
+  it('notifies an admin with MANAGE_APPOINTMENTS when a customer books, naming the customer', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const { userId: adminId } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_APPOINTMENTS] });
+    const { userId: customerId } = await createUserAndToken({ role: ROLES.CUSTOMER, firstName: 'Lerato', lastName: 'Khumalo' });
+
+    await bookingService.createAppointment({
+      userId: String(customerId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const notifications = await (await clientNotificationsCollection().find({ userId: adminId })).toArray();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({ type: 'new_booking', link: '/admin/appointments' });
+    expect(notifications[0].body).toContain('Lerato Khumalo');
+  });
+
+  it('does not notify an admin without MANAGE_APPOINTMENTS', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const { userId: adminId } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_SETTINGS] });
+
+    await bookingService.createAppointment({
+      guestInfo: { name: 'Guest', email: 'guest@example.com', phone: '0821234567' },
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    const notifications = await (await clientNotificationsCollection().find({ userId: adminId })).toArray();
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('does not notify anyone when the booking was created by an admin on a client/guest\'s behalf', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const { userId: adminId } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.MANAGE_APPOINTMENTS] });
+
+    await bookingService.createAppointment({
+      guestInfo: { name: 'Walk-in', email: 'walkin@example.com', phone: '0821234567' },
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+      createdByAdminId: adminId,
+    });
+
+    const notifications = await (await clientNotificationsCollection().find({})).toArray();
+    expect(notifications).toHaveLength(0);
   });
 });
 

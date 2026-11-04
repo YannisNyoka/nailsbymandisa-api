@@ -27,9 +27,22 @@ router.get('/overview', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS)
   }
 });
 
+// Accepts either a plain day-count (a rolling window of that many days ending today) or
+// the literal 'week'/'month' for calendar-aligned boundaries instead — this Monday
+// through today, or the 1st of this calendar month through today — rather than a rolling
+// 7/30-day lookback. See adminService.js's dateStringsForRange for where this lands.
+const rangeSchema = (defaultValue) =>
+  z
+    .string()
+    .default(String(defaultValue))
+    .transform((v) => (v === 'week' || v === 'month' ? v : Number(v)))
+    .refine((v) => v === 'week' || v === 'month' || (Number.isInteger(v) && v >= 1 && v <= 365), {
+      message: 'range must be "week", "month", or a whole number of days from 1 to 365',
+    });
+
 const trendQuerySchema = z.object({
   metric: z.enum(['revenue', 'bookings']),
-  days: z.coerce.number().int().min(1).max(365).default(7),
+  range: rangeSchema(7),
 });
 
 router.get('/trends', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), validate(trendQuerySchema, 'query'), async (req, res, next) => {
@@ -42,7 +55,7 @@ router.get('/trends', requirePermissionOrStaffSelf(PERMISSIONS.VIEW_ANALYTICS), 
 });
 
 const businessSummaryQuerySchema = z.object({
-  days: z.coerce.number().int().min(1).max(365).default(30),
+  range: rangeSchema(30),
 });
 
 router.get(
@@ -60,7 +73,7 @@ router.get(
 );
 
 const topServicesQuerySchema = z.object({
-  days: z.coerce.number().int().min(1).max(365).default(30),
+  range: rangeSchema(30),
   limit: z.coerce.number().int().min(1).max(50).default(8),
 });
 
@@ -79,7 +92,7 @@ router.get(
 );
 
 const staffBookingsQuerySchema = z.object({
-  days: z.coerce.number().int().min(1).max(365).default(30),
+  range: rangeSchema(30),
 });
 
 // Admin-only (not requirePermissionOrStaffSelf) — this ranks every staff member against

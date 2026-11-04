@@ -4,7 +4,7 @@ import { usersCollection } from '../models/users.js';
 import { notFound } from '../utils/AppError.js';
 import { sortByCreatedAtDesc } from '../utils/sorting.js';
 import { sendMail } from '../config/mailer.js';
-import { ROLES, PERMISSIONS } from '../config/constants.js';
+import { ROLES, PERMISSIONS, UNPAID_APPOINTMENT_EXPIRY_MINUTES } from '../config/constants.js';
 
 export async function createClientNotification({ userId, type, title, body, link = null }) {
   const doc = {
@@ -87,8 +87,8 @@ export async function notifyAdminsOfNewBooking({ customerName, date, startTime }
     admins.map((admin) => ({
       userId: admin._id,
       type: 'new_booking',
-      title: 'New booking',
-      body: `${customerName} booked ${date} at ${startTime}.`,
+      title: 'New booking — awaiting payment',
+      body: `${customerName} booked ${date} at ${startTime}. Unpaid — will be removed automatically if not paid within ${UNPAID_APPOINTMENT_EXPIRY_MINUTES / 60} hours.`,
       link: '/admin/appointments',
       isRead: false,
       createdAt: now,

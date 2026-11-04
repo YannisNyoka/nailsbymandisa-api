@@ -57,9 +57,9 @@ export const appointmentsJsonSchema = {
       // Only meaningful while status is pending_payment — a pending appointment never
       // blocks its slot for anyone else (see bookingService.js's evaluateSlot), so this
       // isn't about freeing the slot. It's the deadline after which an abandoned,
-      // never-paid appointment gets auto-cancelled for hygiene (bookingService's
-      // expireDueUnpaidAppointments). Not in `required` for forward-compat with documents
-      // predating this field.
+      // never-paid appointment is permanently deleted for hygiene (bookingService's
+      // expireDueUnpaidAppointments / deleteExpiredUnpaidAppointment). Not in `required`
+      // for forward-compat with documents predating this field.
       autoExpireAt: { bsonType: ['date', 'null'] },
       createdAt: { bsonType: 'date' },
       updatedAt: { bsonType: 'date' },

@@ -386,7 +386,7 @@ describe('bookingService — only a paid appointment holds its slot; a pending o
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
-  it('expireDueUnpaidAppointments cancels only pending appointments whose auto-expire deadline has passed', async () => {
+  it('expireDueUnpaidAppointments permanently deletes only pending appointments whose auto-expire deadline has passed', async () => {
     const service = await createTestService();
     const employee = await createTestEmployee();
 
@@ -413,9 +413,7 @@ describe('bookingService — only a paid appointment holds its slot; a pending o
     const result = await bookingService.expireDueUnpaidAppointments();
     expect(result).toEqual({ expiredCount: 1 });
 
-    const staleAfter = await bookingService.getAppointment(stale._id);
-    expect(staleAfter.status).toBe('cancelled');
-    expect(staleAfter.cancelReason).toMatch(/not completed within/i);
+    await expect(bookingService.getAppointment(stale._id)).rejects.toMatchObject({ statusCode: 404 });
     expect((await bookingService.getAppointment(fresh._id)).status).toBe('pending_payment');
   });
 
@@ -774,6 +772,69 @@ describe('bookingService.completeAppointment', () => {
 
     await expect(
       bookingService.completeAppointment({
+        appointmentId: appointment._id,
+        actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe('bookingService.deleteUnpaidAppointment', () => {
+  it('permanently deletes a pending (unpaid) appointment', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    await bookingService.deleteUnpaidAppointment({
+      appointmentId: appointment._id,
+      actor: { _id: new ObjectId(), role: ROLES.ADMIN },
+    });
+
+    await expect(bookingService.getAppointment(appointment._id)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('rejects a non-admin', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+
+    await expect(
+      bookingService.deleteUnpaidAppointment({ appointmentId: appointment._id, actor: await bookingActor(userId) })
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('rejects an appointment that is already confirmed', async () => {
+    const service = await createTestService();
+    const employee = await createTestEmployee();
+    const userId = new ObjectId();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId),
+      employeeId: String(employee._id),
+      serviceIds: [String(service._id)],
+      date: DATE,
+      startTime: '10:00',
+    });
+    await confirmDirectly(appointment._id);
+
+    await expect(
+      bookingService.deleteUnpaidAppointment({
         appointmentId: appointment._id,
         actor: { _id: new ObjectId(), role: ROLES.ADMIN },
       })

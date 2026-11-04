@@ -104,11 +104,12 @@ export async function checkSlotBookable({ employeeId, date, startTime, endTime, 
   return evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId, lockedMonths });
 }
 
-// Shared cancel-and-notify for a pending_payment appointment that's no longer going
-// anywhere — either nobody ever paid for it (expireDueUnpaidAppointments) or someone
-// else was confirmed for the same slot first (paymentsService.js's
-// initiateBookingDepositPayment). Runs the same notify/log side effects a normal
-// cancellation gets, so the customer isn't left wondering why their booking vanished.
+// Shared cancel-and-notify for a pending_payment appointment that lost to someone else
+// confirmed for the same slot first (paymentsService.js) while payment was actively in
+// flight — kept (not deleted) since a Payment record may reference it for refund/audit
+// purposes. Runs the same notify/log side effects a normal cancellation gets, so the
+// customer isn't left wondering why their booking vanished. For a genuinely abandoned,
+// never-paid appointment, see deleteExpiredUnpaidAppointment below instead.
 export async function cancelUnviableAppointment(appointment, reason) {
   const result = await appointmentsCollection().findOneAndUpdate(
     { _id: appointment._id, status: APPOINTMENT_STATUS.PENDING_PAYMENT },
@@ -134,6 +135,70 @@ export async function cancelUnviableAppointment(appointment, reason) {
   }
 }
 
+// Shared by both the automatic 12-hour sweep and an admin's manual early delete below —
+// a genuinely unpaid hold gets permanently removed (not just cancelled like
+// cancelUnviableAppointment above), per explicit business decision: an unpaid
+// appointment was never a real booking, so there's nothing worth keeping a record of.
+// Deliberately separate from cancelUnviableAppointment — that one is for a payment
+// actively in flight that lost a confirm race (paymentsService.js), where the record
+// needs to survive for the refund/payment audit trail. The status guard in the filter
+// is what makes this safe to race against a payment confirming at the same instant: if
+// the status has already flipped to confirmed, deletedCount is 0 and nothing happens.
+async function removeUnpaidAppointment(appointment, { type, message, actorUserId, notificationBody }) {
+  const result = await appointmentsCollection().deleteOne({
+    _id: appointment._id,
+    status: APPOINTMENT_STATUS.PENDING_PAYMENT,
+  });
+  if (result.deletedCount === 0) return false; // already handled concurrently (paid, or already removed)
+
+  await logActivity({
+    type,
+    message,
+    actorUserId,
+    metadata: { appointmentId: String(appointment._id) },
+  });
+
+  if (appointment.userId) {
+    await createClientNotification({
+      userId: appointment.userId,
+      type: 'booking_cancelled',
+      title: 'Booking removed',
+      body: notificationBody,
+      link: '/book',
+    });
+  }
+  return true;
+}
+
+async function deleteExpiredUnpaidAppointment(appointment) {
+  await removeUnpaidAppointment(appointment, {
+    type: 'booking_auto_deleted',
+    message: `Unpaid booking on ${appointment.date} at ${appointment.startTime} deleted after ${UNPAID_APPOINTMENT_EXPIRY_MINUTES / 60} hours with no payment.`,
+    actorUserId: appointment.userId,
+    notificationBody: `Your booking for ${appointment.date} at ${appointment.startTime} was removed because payment was not completed in time.`,
+  });
+}
+
+// Lets an admin apply the same "unpaid = not a real booking" deletion immediately,
+// rather than waiting out the rest of the 12-hour grace period — e.g. clearing out the
+// Overview page's "unpaid bookings" count for ones they already know aren't going
+// anywhere. Only ever targets a still-pending appointment; a confirmed/completed one has
+// its own cancel flow (cancelAppointment) that keeps the record.
+export async function deleteUnpaidAppointment({ appointmentId, actor }) {
+  if (actor.role !== 'admin') throw forbidden();
+  const appointment = await getAppointment(appointmentId);
+  if (appointment.status !== APPOINTMENT_STATUS.PENDING_PAYMENT) {
+    throw badRequest('Only an unpaid (pending payment) appointment can be deleted this way.');
+  }
+  const deleted = await removeUnpaidAppointment(appointment, {
+    type: 'booking_deleted',
+    message: `Unpaid booking on ${appointment.date} at ${appointment.startTime} deleted by admin.`,
+    actorUserId: actor._id,
+    notificationBody: `Your booking for ${appointment.date} at ${appointment.startTime} was removed by the salon.`,
+  });
+  if (!deleted) throw notFound('Appointment');
+}
+
 // Cron-driven hygiene pass (routes/cron.js). Purely cosmetic/organizational, never load
 // bearing for double-booking correctness — a pending_payment appointment never blocked
 // anyone else's slot in the first place (SLOT_BLOCKING_STATUSES above), so this doesn't
@@ -148,7 +213,7 @@ export async function expireDueUnpaidAppointments() {
   ).toArray();
   for (const appointment of stale) {
     // eslint-disable-next-line no-await-in-loop -- a periodic sweep, not a hot request path
-    await cancelUnviableAppointment(appointment, `Payment was not completed within ${UNPAID_APPOINTMENT_EXPIRY_MINUTES} minutes.`);
+    await deleteExpiredUnpaidAppointment(appointment);
   }
   return { expiredCount: stale.length };
 }

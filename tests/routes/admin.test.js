@@ -201,7 +201,7 @@ describe('GET /api/admin/trends', () => {
     await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: { date: today } });
 
     const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
-    const res = await request(app).get('/api/admin/trends?metric=bookings&days=365').set('Authorization', `Bearer ${accessToken}`);
+    const res = await request(app).get('/api/admin/trends?metric=bookings&range=365').set('Authorization', `Bearer ${accessToken}`);
     expect(res.status).toBe(200);
     expect(res.body.points).toHaveLength(365);
     const dayWithBooking = res.body.points.find((p) => p.date === today);
@@ -238,7 +238,7 @@ describe('GET /api/admin/analytics/summary', () => {
     await appointmentsCollection().updateOne({ _id: outsideWindow._id }, { $set: { date: '2000-01-01' } });
 
     const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
-    const res = await request(app).get('/api/admin/analytics/summary?days=7').set('Authorization', `Bearer ${accessToken}`);
+    const res = await request(app).get('/api/admin/analytics/summary?range=7').set('Authorization', `Bearer ${accessToken}`);
     expect(res.status).toBe(200);
     expect(res.body.bookingsInWindow).toBe(1);
     expect(res.body.bookingsToday).toBe(1);
@@ -265,7 +265,7 @@ describe('GET /api/admin/analytics/summary', () => {
     await appointmentsCollection().updateOne({ _id: theirs._id }, { $set: { date: today } });
 
     const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: myEmployee._id });
-    const res = await request(app).get('/api/admin/analytics/summary?days=7').set('Authorization', `Bearer ${accessToken}`);
+    const res = await request(app).get('/api/admin/analytics/summary?range=7').set('Authorization', `Bearer ${accessToken}`);
     expect(res.status).toBe(200);
     expect(res.body.bookingsInWindow).toBe(1);
     expect(res.body.totalClients).toBeNull();
@@ -297,7 +297,7 @@ describe('GET /api/admin/analytics/top-services', () => {
     await appointmentsCollection().updateOne({ _id: cancelledOne._id }, { $set: { date: today, status: 'cancelled' } });
 
     const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
-    const res = await request(app).get('/api/admin/analytics/top-services?days=30').set('Authorization', `Bearer ${accessToken}`);
+    const res = await request(app).get('/api/admin/analytics/top-services?range=30').set('Authorization', `Bearer ${accessToken}`);
     expect(res.status).toBe(200);
     expect(res.body.items[0]).toEqual({ serviceId: String(popular._id), name: 'Gel Manicure', count: 2 });
     expect(res.body.items[1]).toEqual({ serviceId: String(rare._id), name: 'Nail Art', count: 1 });

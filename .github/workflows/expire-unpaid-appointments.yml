@@ -2,10 +2,12 @@ name: Expire abandoned unpaid appointments
 
 # A pending_payment appointment never blocks its slot for anyone else (see
 # bookingService.js's SLOT_BLOCKING_STATUSES) — this job is pure hygiene, not load
-# bearing for double-booking correctness. It formally cancels appointments nobody ever
-# paid for, so they stop cluttering "my bookings"/admin views as if still awaiting
-# payment. Runs every 5 minutes (vs. the reminders job's hourly cadence) since the
-# expiry window itself is short (UNPAID_APPOINTMENT_EXPIRY_MINUTES, src/config/constants.js).
+# bearing for double-booking correctness. It permanently deletes appointments nobody
+# ever paid for (an unpaid appointment was never a real booking, so nothing is kept),
+# so they stop cluttering "my bookings"/admin views as if still awaiting payment. Runs
+# every 5 minutes (vs. the reminders job's hourly cadence) so a deletion follows the
+# UNPAID_APPOINTMENT_EXPIRY_MINUTES deadline (src/config/constants.js) reasonably
+# promptly rather than sitting stale for up to an hour.
 on:
   schedule:
     - cron: '*/5 * * * *'

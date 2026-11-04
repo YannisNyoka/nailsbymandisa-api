@@ -6,12 +6,23 @@ import { servicesCollection } from '../models/services.js';
 import { employeesCollection } from '../models/employees.js';
 import { usersCollection, toPublicUser } from '../models/users.js';
 import { ROLES, APPOINTMENT_STATUS, PAYMENT_STATUS, PAYMENT_PURPOSE, PAGINATION } from '../config/constants.js';
-import { todayDateString, dateStringFor, lastNDateStrings } from '../utils/businessTime.js';
+import { todayDateString, dateStringFor, lastNDateStrings, currentWeekDateStrings, currentMonthDateStrings } from '../utils/businessTime.js';
 import { badRequest, notFound } from '../utils/AppError.js';
 import { listActivity } from './activityLogService.js';
 
 const PAID_STATUSES = [PAYMENT_STATUS.PAID, PAYMENT_STATUS.PARTIALLY_REFUNDED, PAYMENT_STATUS.REFUNDED];
 const netCents = (p) => p.amountCents - p.refundedAmountCents;
+
+// Shared by every windowed report below — `range` is either a plain day-count (a rolling
+// window of that many days ending today, as this app has always done) or the literal
+// 'week'/'month' for calendar-aligned boundaries instead (this Monday through today, or
+// the 1st of this calendar month through today) — see routes/admin.js's rangeSchema for
+// where that string reaches here from the query param.
+function dateStringsForRange(range) {
+  if (range === 'week') return currentWeekDateStrings();
+  if (range === 'month') return currentMonthDateStrings();
+  return lastNDateStrings(range);
+}
 
 // §4.12 admin overview. Deliberately computed from full collection scans reduced in
 // application code (consistent with every other list/report in this codebase) rather
@@ -53,10 +64,14 @@ export async function getOverviewStats({ employeeId } = {}) {
   const paidPayments = payments.filter((p) => PAID_STATUSES.includes(p.status));
   const netRevenueCents = paidPayments.reduce((sum, p) => sum + netCents(p), 0);
 
-  // Rolling windows (last 1/7/30 days ending today), not calendar week/month — avoids
-  // "what day does the week start on" ambiguity and matches how the trend charts below
-  // window their own data.
-  const [last1, last7, last30] = [1, 7, 30].map((n) => new Set(lastNDateStrings(n)));
+  // "Today" is always a 1-day rolling window (trivially the same as "today" read any
+  // other way); "week"/"month" are calendar-aligned (Monday through today, and the 1st
+  // of the month through today) rather than a rolling 7/30-day lookback — explicit
+  // business decision, matching the same "week"/"month" range values Business Analytics
+  // accepts (dateStringsForRange above).
+  const todayWindow = new Set(lastNDateStrings(1));
+  const weekWindow = new Set(currentWeekDateStrings());
+  const monthWindow = new Set(currentMonthDateStrings());
   const revenueInWindow = (window) =>
     paidPayments.filter((p) => window.has(dateStringFor(p.createdAt))).reduce((sum, p) => sum + netCents(p), 0);
 
@@ -96,9 +111,9 @@ export async function getOverviewStats({ employeeId } = {}) {
     // entirely for a staff-scoped caller (not just narrowed to their own bookings), so
     // it's never in the response at all, not just hidden by the admin UI.
     netRevenueCents: employeeObjectId ? null : netRevenueCents,
-    revenueTodayCents: employeeObjectId ? null : revenueInWindow(last1),
-    revenueWeekCents: employeeObjectId ? null : revenueInWindow(last7),
-    revenueMonthCents: employeeObjectId ? null : revenueInWindow(last30),
+    revenueTodayCents: employeeObjectId ? null : revenueInWindow(todayWindow),
+    revenueWeekCents: employeeObjectId ? null : revenueInWindow(weekWindow),
+    revenueMonthCents: employeeObjectId ? null : revenueInWindow(monthWindow),
     revenueBreakdown: employeeObjectId ? null : revenueBreakdown,
     avgBookingValueCents: employeeObjectId ? null : avgBookingValueCents,
     cancellationsCount,
@@ -115,9 +130,9 @@ export async function getOverviewStats({ employeeId } = {}) {
 // figure at once, matching how the salon owner asked for it) — getOverviewStats above
 // stays fixed-window (today/week/month) for the always-visible dashboard glance, this is
 // the deliberately re-windowable counterpart everything on that page is built from.
-export async function getBusinessSummary({ days = 30, employeeId } = {}) {
+export async function getBusinessSummary({ range = 30, employeeId } = {}) {
   const today = todayDateString();
-  const dateStrings = new Set(lastNDateStrings(days));
+  const dateStrings = new Set(dateStringsForRange(range));
   const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
   const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
 
@@ -169,7 +184,7 @@ export async function getBusinessSummary({ days = 30, employeeId } = {}) {
     : null;
 
   return {
-    days,
+    range,
     // Revenue is salon financial data, not staff-facing operational info — withheld
     // entirely for a staff-scoped caller (not just narrowed to their own bookings), so
     // it's never in the response at all, not just hidden by the admin UI.
@@ -191,10 +206,10 @@ export async function getBusinessSummary({ days = 30, employeeId } = {}) {
 
 // §SEO-analytics-followup — "which services/staff/clients actually drive the business,"
 // not just aggregate totals. All three below share the same non-cancelled-bookings
-// window as the trend charts (lastNDateStrings), full-scan-then-reduce like everything
+// window as the trend charts (dateStringsForRange), full-scan-then-reduce like everything
 // else in this file.
-export async function getTopServices({ days = 30, limit = 8, employeeId } = {}) {
-  const dateStrings = new Set(lastNDateStrings(days));
+export async function getTopServices({ range = 30, limit = 8, employeeId } = {}) {
+  const dateStrings = new Set(dateStringsForRange(range));
   const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
   const filter = employeeObjectId ? { employeeId: employeeObjectId } : {};
 
@@ -218,13 +233,13 @@ export async function getTopServices({ days = 30, limit = 8, employeeId } = {}) 
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
 
-  return { days, items };
+  return { range, items };
 }
 
 // Admin-only (never staff-scoped) — comparing headcount across staff is exactly the
 // cross-staff visibility a staff account must never get (§ staff-scoped admin access).
-export async function getStaffBookingsBreakdown({ days = 30 } = {}) {
-  const dateStrings = new Set(lastNDateStrings(days));
+export async function getStaffBookingsBreakdown({ range = 30 } = {}) {
+  const dateStrings = new Set(dateStringsForRange(range));
   const [appointments, employees] = await Promise.all([
     (await appointmentsCollection().find({})).toArray(),
     (await employeesCollection().find({})).toArray(),
@@ -242,7 +257,7 @@ export async function getStaffBookingsBreakdown({ days = 30 } = {}) {
     .map(([employeeId, count]) => ({ employeeId, name: employeeById.get(employeeId) || 'Former staff member', count }))
     .sort((a, b) => b.count - a.count);
 
-  return { days, items };
+  return { range, items };
 }
 
 // Admin-only — ranks the whole client base, not one staff member's own clients.
@@ -277,13 +292,14 @@ export async function getTopClients({ limit = 5 } = {}) {
 
 const TREND_METRICS = new Set(['revenue', 'bookings']);
 
-// §4.12 admin overview charts. `days` windows the x-axis (7/30/365 → Week/Month/Year in
-// the UI); bucketing is by the appointment's own `date` for bookings, and by payment
-// `createdAt` (business-tz) for revenue — same full-scan-then-reduce style as
-// getOverviewStats(), fine at this app's scale.
-export async function getTrend({ metric, days = 7, employeeId }) {
+// §4.12 admin overview charts. `range` windows the x-axis — either a rolling day-count
+// (365 → Year in the UI) or the calendar-aligned 'week'/'month' (→ Week/Month in the
+// UI, dateStringsForRange above); bucketing is by the appointment's own `date` for
+// bookings, and by payment `createdAt` (business-tz) for revenue — same
+// full-scan-then-reduce style as getOverviewStats(), fine at this app's scale.
+export async function getTrend({ metric, range = 7, employeeId }) {
   if (!TREND_METRICS.has(metric)) throw badRequest(`Unknown trend metric: ${metric}`);
-  const dateStrings = lastNDateStrings(days);
+  const dateStrings = dateStringsForRange(range);
   const employeeObjectId = employeeId ? new ObjectId(employeeId) : null;
   const appointmentsFilter = employeeObjectId ? { employeeId: employeeObjectId } : {};
 
@@ -299,7 +315,7 @@ export async function getTrend({ metric, days = 7, employeeId }) {
       const d = dateStringFor(p.createdAt);
       if (byDate.has(d)) byDate.set(d, byDate.get(d) + netCents(p));
     }
-    return { metric, days, points: dateStrings.map((date) => ({ date, revenueCents: byDate.get(date) })) };
+    return { metric, range, points: dateStrings.map((date) => ({ date, revenueCents: byDate.get(date) })) };
   }
 
   const appointments = await (await appointmentsCollection().find(appointmentsFilter)).toArray();
@@ -311,7 +327,7 @@ export async function getTrend({ metric, days = 7, employeeId }) {
     else if (a.status === APPOINTMENT_STATUS.COMPLETED) bucket.completed += 1;
     else if ([APPOINTMENT_STATUS.PENDING_PAYMENT, APPOINTMENT_STATUS.CONFIRMED].includes(a.status)) bucket.booked += 1;
   }
-  return { metric, days, points: dateStrings.map((date) => ({ date, ...byDate.get(date) })) };
+  return { metric, range, points: dateStrings.map((date) => ({ date, ...byDate.get(date) })) };
 }
 
 export async function listClients({ page = 1, pageSize = PAGINATION.DEFAULT_LIMIT, search } = {}) {

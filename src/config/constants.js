@@ -70,8 +70,9 @@ export const SLOT_GRANULARITY_MINUTES = 30;
 // A pending_payment appointment never blocks its slot for anyone else (see
 // bookingService.js's evaluateSlot) — this is purely a hygiene deadline: if payment
 // still hasn't come in after this many minutes, the abandoned appointment is
-// auto-cancelled so it stops cluttering "my bookings"/admin views as if still live.
-export const UNPAID_APPOINTMENT_EXPIRY_MINUTES = 15;
+// permanently deleted (not just cancelled) so it stops cluttering "my bookings"/admin
+// views as if still live.
+export const UNPAID_APPOINTMENT_EXPIRY_MINUTES = 12 * 60;
 // Floor so a stacked discount + points redemption can never reduce a Yoco charge to
 // zero/negative — payment gateways require a positive amount.
 export const MIN_CHARGE_CENTS = 100;

@@ -37,6 +37,32 @@ export function lastNDateStrings(n) {
   return dates;
 }
 
+// All calendar dates from this week's Monday through today (inclusive) — for "this
+// week" figures, as opposed to lastNDateStrings' rolling N-day window. getUTCDay() is
+// 0=Sun..6=Sat; (day + 6) % 7 turns that into "days since Monday" (Monday itself -> 0,
+// Sunday -> 6).
+export function currentWeekDateStrings() {
+  const now = nowInBusinessTz();
+  const daysSinceMonday = (now.getUTCDay() + 6) % 7;
+  const dates = [];
+  for (let i = daysSinceMonday; i >= 0; i -= 1) {
+    const d = new Date(now.getTime() - i * 86_400_000);
+    dates.push(`${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`);
+  }
+  return dates;
+}
+
+// All calendar dates from the 1st of this month through today (inclusive) — for "this
+// month" figures, as opposed to lastNDateStrings' rolling N-day window.
+export function currentMonthDateStrings() {
+  const now = nowInBusinessTz();
+  const dates = [];
+  for (let day = 1; day <= now.getUTCDate(); day += 1) {
+    dates.push(`${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(day)}`);
+  }
+  return dates;
+}
+
 export function nowTimeString() {
   const d = nowInBusinessTz();
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;

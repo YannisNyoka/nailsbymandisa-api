@@ -339,6 +339,60 @@ describe('GET /api/admin/analytics/staff-bookings', () => {
   });
 });
 
+describe('GET /api/admin/analytics/growth', () => {
+  it('is admin-only, never available to a staff account', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: (await createTestEmployee())._id });
+    const res = await request(app).get('/api/admin/analytics/growth').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects an unknown unit', async () => {
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app)
+      .get('/api/admin/analytics/growth?unit=fortnight')
+      .set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("counts today's revenue/bookings/new customers toward the current period, with no last-period data to compare against yet", async () => {
+    const { userId } = await createUserAndToken({ role: ROLES.CUSTOMER });
+    const service = await createTestService({ priceCents: 20000 });
+    const employee = await createTestEmployee();
+    const today = todayDateString();
+
+    const appointment = await bookingService.createAppointment({
+      userId: String(userId), employeeId: String(employee._id), serviceIds: [String(service._id)], date: DATE, startTime: '09:00',
+    });
+    const payment = await paymentsService.initiateBookingDepositPayment({
+      appointmentId: appointment._id,
+      actor: { _id: userId, role: ROLES.CUSTOMER },
+      yoco: { createCheckout: async () => ({ id: 'c1', redirectUrl: 'https://x' }) },
+    });
+    await paymentsService.handlePaymentSucceeded({ paymentId: payment._id, yocoPaymentId: 'pay_1' });
+    await appointmentsCollection().updateOne({ _id: appointment._id }, { $set: { date: today } });
+
+    const { accessToken } = await createUserAndToken({ role: ROLES.ADMIN, permissions: [PERMISSIONS.VIEW_ANALYTICS] });
+    const res = await request(app).get('/api/admin/analytics/growth?unit=week').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.unit).toBe('week');
+
+    expect(res.body.revenue.current).toBe(payment.amountCents);
+    expect(res.body.revenue.sameStretchLastPeriod).toBe(0);
+    expect(res.body.revenue.growthPct).toBeNull();
+
+    expect(res.body.bookings.current).toBe(1);
+    // The test customer account itself was just created "now" — this is the one real
+    // new-customer signup the window should see.
+    expect(res.body.newCustomers.current).toBeGreaterThanOrEqual(1);
+
+    for (const metric of ['revenue', 'bookings', 'newCustomers']) {
+      expect(res.body.trend[metric]).toHaveLength(8);
+      expect(res.body.trend[metric].at(-1).isCurrent).toBe(true);
+      expect(res.body.trend[metric].slice(0, 7).every((p) => p.isCurrent === false)).toBe(true);
+    }
+  });
+});
+
 describe('GET /api/admin/analytics/top-clients', () => {
   it('is admin-only, never available to a staff account', async () => {
     const { accessToken } = await createUserAndToken({ role: ROLES.STAFF, employeeId: (await createTestEmployee())._id });

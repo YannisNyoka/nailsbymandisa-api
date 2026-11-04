@@ -110,6 +110,25 @@ router.get(
   }
 );
 
+const growthQuerySchema = z.object({
+  unit: z.enum(['week', 'month', 'year']).default('week'),
+});
+
+// Admin-only (not requirePermissionOrStaffSelf) — revenue is in here, same boundary as
+// staff-bookings above.
+router.get(
+  '/analytics/growth',
+  requirePermission(PERMISSIONS.VIEW_ANALYTICS),
+  validate(growthQuerySchema, 'query'),
+  async (req, res, next) => {
+    try {
+      res.json(await adminService.getBusinessGrowth(req.query));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 const topClientsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(5),
 });

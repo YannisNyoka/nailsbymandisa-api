@@ -63,6 +63,72 @@ export function currentMonthDateStrings() {
   return dates;
 }
 
+function dateStringFromUTCDate(d) {
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+
+// Start of the named calendar period ('week' = Monday, 'month' = the 1st, 'year' =
+// Jan 1) containing `date` — a BUSINESS_TZ-shifted Date, read/returned via UTC getters
+// per this file's convention (see nowInBusinessTz).
+function startOfPeriod(date, unit) {
+  if (unit === 'week') {
+    const daysSinceMonday = (date.getUTCDay() + 6) % 7; // getUTCDay is 0=Sun..6=Sat
+    return new Date(date.getTime() - daysSinceMonday * 86_400_000);
+  }
+  if (unit === 'month') return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+  return new Date(Date.UTC(date.getUTCFullYear(), 0, 1)); // year
+}
+
+// The named period's true calendar end (Sunday / the month's last day / Dec 31) given
+// its start.
+function endOfPeriod(start, unit) {
+  if (unit === 'week') return new Date(start.getTime() + 6 * 86_400_000);
+  if (unit === 'month') return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0));
+  return new Date(Date.UTC(start.getUTCFullYear(), 11, 31)); // year
+}
+
+// Moves a period start `count` periods forward (negative = backward) — e.g.
+// shiftPeriodStart(thisMonthStart, 'month', -1) is last month's 1st. Uses Date.UTC's
+// month/year rollover rather than fixed-day arithmetic, since months/years aren't a
+// fixed number of days.
+function shiftPeriodStart(start, unit, count) {
+  if (unit === 'week') return new Date(start.getTime() + count * 7 * 86_400_000);
+  if (unit === 'month') return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + count, 1));
+  return new Date(Date.UTC(start.getUTCFullYear() + count, 0, 1)); // year
+}
+
+// Calendar bounds (inclusive, YYYY-MM-DD strings) of the named period ('week' = Monday-
+// Sunday, 'month' = calendar month, 'year' = calendar year) `periodsAgo` periods back
+// from the current one (0 = this period). The end date is capped at today when
+// periodsAgo is 0 — the current period isn't over yet — every other value gets the
+// period's true calendar end, since a past period is always already complete. Powers
+// the Business Growth panel's period comparisons and 8-period trend bars
+// (adminService.getBusinessGrowth).
+export function periodRangeSoFar(unit, periodsAgo = 0) {
+  const now = nowInBusinessTz();
+  const currentStart = startOfPeriod(now, unit);
+  const start = shiftPeriodStart(currentStart, unit, -periodsAgo);
+  const end = periodsAgo === 0 ? now : endOfPeriod(start, unit);
+  return { start: dateStringFromUTCDate(start), end: dateStringFromUTCDate(end) };
+}
+
+// Bounds (inclusive, YYYY-MM-DD strings) of the first N calendar days of the period
+// `periodsAgo` back, where N = how many days have elapsed so far in the CURRENT period
+// — an apples-to-apples slice of a past period ("same point last week/month/year") to
+// compare against a current period that isn't over yet. Capped at the past period's own
+// true end — e.g. comparing March 31 (elapsed 30 days into the month) against February
+// must land on Feb 28/29, not overflow 30 days past Feb 1 into March.
+export function sameStretchRangeSoFar(unit, periodsAgo) {
+  const now = nowInBusinessTz();
+  const currentStart = startOfPeriod(now, unit);
+  const elapsedDays = Math.round((now.getTime() - currentStart.getTime()) / 86_400_000);
+  const pastStart = shiftPeriodStart(currentStart, unit, -periodsAgo);
+  const pastPeriodEnd = endOfPeriod(pastStart, unit);
+  const uncappedEnd = new Date(pastStart.getTime() + elapsedDays * 86_400_000);
+  const end = uncappedEnd.getTime() > pastPeriodEnd.getTime() ? pastPeriodEnd : uncappedEnd;
+  return { start: dateStringFromUTCDate(pastStart), end: dateStringFromUTCDate(end) };
+}
+
 export function nowTimeString() {
   const d = nowInBusinessTz();
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;

@@ -6,7 +6,15 @@ import { servicesCollection } from '../models/services.js';
 import { employeesCollection } from '../models/employees.js';
 import { usersCollection, toPublicUser } from '../models/users.js';
 import { ROLES, APPOINTMENT_STATUS, PAYMENT_STATUS, PAYMENT_PURPOSE, PAGINATION } from '../config/constants.js';
-import { todayDateString, dateStringFor, lastNDateStrings, currentWeekDateStrings, currentMonthDateStrings } from '../utils/businessTime.js';
+import {
+  todayDateString,
+  dateStringFor,
+  lastNDateStrings,
+  currentWeekDateStrings,
+  currentMonthDateStrings,
+  periodRangeSoFar,
+  sameStretchRangeSoFar,
+} from '../utils/businessTime.js';
 import { badRequest, notFound } from '../utils/AppError.js';
 import { listActivity } from './activityLogService.js';
 
@@ -201,6 +209,83 @@ export async function getBusinessSummary({ range = 30, employeeId } = {}) {
     newClientsInWindow,
     loyaltyMemberCount,
     avgLoyaltyPoints,
+  };
+}
+
+const GROWTH_UNITS = new Set(['week', 'month', 'year']);
+
+// "Business Growth" panel — period-over-period comparison (this week/month/year so far
+// vs. the same elapsed stretch of the previous one — an apples-to-apples read even
+// mid-period, since the current period is never complete yet — plus that previous
+// period's full total for extra context) and an 8-period trend for revenue, bookings
+// and new customers. Admin-only (never staff-scoped, unlike getBusinessSummary above) —
+// revenue is salon financial data staff never see, and nothing has asked for a
+// staff-scoped read of the other two either, so the whole panel is kept simple as one
+// admin-only endpoint rather than partially withholding fields.
+export async function getBusinessGrowth({ unit = 'week' } = {}) {
+  if (!GROWTH_UNITS.has(unit)) throw badRequest(`Unknown growth unit: ${unit}`);
+
+  const [appointments, allPayments, customers] = await Promise.all([
+    (await appointmentsCollection().find({})).toArray(),
+    (await paymentsCollection().find({})).toArray(),
+    (await usersCollection().find({ role: ROLES.CUSTOMER })).toArray(),
+  ]);
+  const paidPayments = allPayments.filter((p) => PAID_STATUSES.includes(p.status));
+
+  const revenueInRange = (start, end) =>
+    paidPayments
+      .filter((p) => {
+        const d = dateStringFor(p.createdAt);
+        return d >= start && d <= end;
+      })
+      .reduce((sum, p) => sum + netCents(p), 0);
+
+  const bookingsInRange = (start, end) =>
+    appointments.filter((a) => a.date >= start && a.date <= end && a.status !== APPOINTMENT_STATUS.CANCELLED).length;
+
+  const newCustomersInRange = (start, end) =>
+    customers.filter((c) => {
+      const d = dateStringFor(c.createdAt);
+      return d >= start && d <= end;
+    }).length;
+
+  // sameStretchValue === 0 means there's nothing from last period to meaningfully compare
+  // against (not "infinite growth") — surfaced as growthPct: null, which the UI reads as
+  // "no last period data" rather than a misleading percentage.
+  function metricFor(valueInRange) {
+    const current = periodRangeSoFar(unit, 0);
+    const sameStretch = sameStretchRangeSoFar(unit, 1);
+    const fullLast = periodRangeSoFar(unit, 1);
+    const currentValue = valueInRange(current.start, current.end);
+    const sameStretchValue = valueInRange(sameStretch.start, sameStretch.end);
+    const fullLastValue = valueInRange(fullLast.start, fullLast.end);
+    const growthPct =
+      sameStretchValue > 0 ? Math.round(((currentValue - sameStretchValue) / sameStretchValue) * 1000) / 10 : null;
+    return { current: currentValue, sameStretchLastPeriod: sameStretchValue, fullLastPeriod: fullLastValue, growthPct };
+  }
+
+  // Oldest first, so the chart reads left-to-right like every other trend here — the
+  // current (still in progress) period lands last, flagged via isCurrent for the UI to
+  // draw it in a visually distinct color from the 7 completed periods before it.
+  function trendFor(valueInRange) {
+    const points = [];
+    for (let i = 7; i >= 0; i -= 1) {
+      const { start, end } = periodRangeSoFar(unit, i);
+      points.push({ periodStart: start, value: valueInRange(start, end), isCurrent: i === 0 });
+    }
+    return points;
+  }
+
+  return {
+    unit,
+    revenue: metricFor(revenueInRange),
+    bookings: metricFor(bookingsInRange),
+    newCustomers: metricFor(newCustomersInRange),
+    trend: {
+      revenue: trendFor(revenueInRange),
+      bookings: trendFor(bookingsInRange),
+      newCustomers: trendFor(newCustomersInRange),
+    },
   };
 }
 

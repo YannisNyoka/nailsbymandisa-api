@@ -270,7 +270,7 @@ router.post('/:id/complete', authenticate, async (req, res, next) => {
 });
 
 // Admin-only, and only for a still-unpaid appointment — lets an admin apply the same
-// "unpaid = not a real booking" deletion the 12-hour cron sweep applies automatically
+// "unpaid = not a real booking" deletion the 5-hour cron sweep applies automatically
 // (bookingService.deleteUnpaidAppointment), without waiting out the rest of the window.
 router.delete('/:id', authenticate, async (req, res, next) => {
   try {

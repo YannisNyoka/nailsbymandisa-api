@@ -135,7 +135,7 @@ export async function cancelUnviableAppointment(appointment, reason) {
   }
 }
 
-// Shared by both the automatic 12-hour sweep and an admin's manual early delete below —
+// Shared by both the automatic 5-hour sweep and an admin's manual early delete below —
 // a genuinely unpaid hold gets permanently removed (not just cancelled like
 // cancelUnviableAppointment above), per explicit business decision: an unpaid
 // appointment was never a real booking, so there's nothing worth keeping a record of.
@@ -180,7 +180,7 @@ async function deleteExpiredUnpaidAppointment(appointment) {
 }
 
 // Lets an admin apply the same "unpaid = not a real booking" deletion immediately,
-// rather than waiting out the rest of the 12-hour grace period — e.g. clearing out the
+// rather than waiting out the rest of the 5-hour grace period — e.g. clearing out the
 // Overview page's "unpaid bookings" count for ones they already know aren't going
 // anywhere. Only ever targets a still-pending appointment; a confirmed/completed one has
 // its own cancel flow (cancelAppointment) that keeps the record.

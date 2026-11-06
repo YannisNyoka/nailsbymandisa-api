@@ -59,7 +59,7 @@ router.post('/complete-past-appointments', cronLimiter, requireCronSecret, async
 // already runs when a customer's own browser polls the confirmation page, but run here on
 // a schedule so a genuinely-paid booking still gets confirmed even if nobody's browser is
 // around to ask. Runs every minute (see .github/workflows/reconcile-pending-payments.yml)
-// — comfortably inside expire-unpaid-appointments' 12-hour deletion window — so a
+// — comfortably inside expire-unpaid-appointments' 5-hour deletion window — so a
 // genuinely-paid booking has every chance to get confirmed well before that job would
 // otherwise delete it as abandoned.
 router.post('/reconcile-pending-payments', cronLimiter, requireCronSecret, async (req, res, next) => {

@@ -692,7 +692,7 @@ function sleep(ms) {
 // anyone else) who closes the tab before that poll succeeds. This sweeps every currently
 // pending_payment appointment the same way, on a schedule, so a genuinely-paid booking
 // gets confirmed within minutes regardless of whether anyone's browser is still around to
-// ask — specifically so it has a real chance to beat expireDueUnpaidAppointments' 12-hour
+// ask — specifically so it has a real chance to beat expireDueUnpaidAppointments' 5-hour
 // window, not just eventually catch up after the booking's already been wrongly deleted.
 // A small delay between checkouts keeps this polite to Yoco's API rather than firing
 // dozens of requests at once.

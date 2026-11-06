@@ -72,7 +72,7 @@ export const SLOT_GRANULARITY_MINUTES = 30;
 // still hasn't come in after this many minutes, the abandoned appointment is
 // permanently deleted (not just cancelled) so it stops cluttering "my bookings"/admin
 // views as if still live.
-export const UNPAID_APPOINTMENT_EXPIRY_MINUTES = 12 * 60;
+export const UNPAID_APPOINTMENT_EXPIRY_MINUTES = 5 * 60;
 // Floor so a stacked discount + points redemption can never reduce a Yoco charge to
 // zero/negative — payment gateways require a positive amount.
 export const MIN_CHARGE_CENTS = 100;

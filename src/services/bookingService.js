@@ -104,6 +104,21 @@ export async function checkSlotBookable({ employeeId, date, startTime, endTime, 
   return evaluateSlot({ employee, date, startTime, endTime, blocksForDay, appointmentsForDay, excludeAppointmentId, lockedMonths });
 }
 
+// Shared by every activity-log message below that names whose appointment it's about —
+// without this they just said "Booking on <date> at <time>", leaving an admin reading
+// the feed with no idea which client each entry was even for.
+export async function resolveClientName(appointment) {
+  if (appointment.guestInfo?.name) return appointment.guestInfo.name;
+  if (appointment.userId) {
+    const customer = await usersCollection().findOne(
+      { _id: appointment.userId },
+      { projection: { firstName: 1, lastName: 1 } }
+    );
+    if (customer) return `${customer.firstName} ${customer.lastName}`;
+  }
+  return 'a customer';
+}
+
 // Shared cancel-and-notify for a pending_payment appointment that lost to someone else
 // confirmed for the same slot first (paymentsService.js) while payment was actively in
 // flight — kept (not deleted) since a Payment record may reference it for refund/audit
@@ -117,9 +132,10 @@ export async function cancelUnviableAppointment(appointment, reason) {
   );
   if (!result) return; // already handled concurrently — nothing more to do
 
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type: 'booking_auto_cancelled',
-    message: `Booking on ${appointment.date} at ${appointment.startTime} auto-cancelled: ${reason}`,
+    message: `Booking for ${clientName} on ${appointment.date} at ${appointment.startTime} auto-cancelled: ${reason}`,
     actorUserId: appointment.userId,
     metadata: { appointmentId: String(appointment._id) },
   });
@@ -144,16 +160,17 @@ export async function cancelUnviableAppointment(appointment, reason) {
 // needs to survive for the refund/payment audit trail. The status guard in the filter
 // is what makes this safe to race against a payment confirming at the same instant: if
 // the status has already flipped to confirmed, deletedCount is 0 and nothing happens.
-async function removeUnpaidAppointment(appointment, { type, message, actorUserId, notificationBody }) {
+async function removeUnpaidAppointment(appointment, { type, reasonSuffix, actorUserId, notificationBody }) {
   const result = await appointmentsCollection().deleteOne({
     _id: appointment._id,
     status: APPOINTMENT_STATUS.PENDING_PAYMENT,
   });
   if (result.deletedCount === 0) return false; // already handled concurrently (paid, or already removed)
 
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type,
-    message,
+    message: `Unpaid booking for ${clientName} on ${appointment.date} at ${appointment.startTime} — ${reasonSuffix}`,
     actorUserId,
     metadata: { appointmentId: String(appointment._id) },
   });
@@ -173,7 +190,7 @@ async function removeUnpaidAppointment(appointment, { type, message, actorUserId
 async function deleteExpiredUnpaidAppointment(appointment) {
   await removeUnpaidAppointment(appointment, {
     type: 'booking_auto_deleted',
-    message: `Unpaid booking on ${appointment.date} at ${appointment.startTime} deleted after ${UNPAID_APPOINTMENT_EXPIRY_MINUTES / 60} hours with no payment.`,
+    reasonSuffix: `deleted after ${UNPAID_APPOINTMENT_EXPIRY_MINUTES / 60} hours with no payment.`,
     actorUserId: appointment.userId,
     notificationBody: `Your booking for ${appointment.date} at ${appointment.startTime} was removed because payment was not completed in time.`,
   });
@@ -192,7 +209,7 @@ export async function deleteUnpaidAppointment({ appointmentId, actor }) {
   }
   const deleted = await removeUnpaidAppointment(appointment, {
     type: 'booking_deleted',
-    message: `Unpaid booking on ${appointment.date} at ${appointment.startTime} deleted by admin.`,
+    reasonSuffix: 'deleted manually by admin.',
     actorUserId: actor._id,
     notificationBody: `Your booking for ${appointment.date} at ${appointment.startTime} was removed by the salon.`,
   });
@@ -357,23 +374,31 @@ export async function createAppointment({ userId, guestInfo, employeeId, service
 
   try {
     const { insertedId } = await appointmentsCollection().insertOne(doc);
+
+    // Resolved once and reused for both the activity log entry and the admin
+    // notification below — previously only computed for the notification (skipped
+    // entirely for an admin-created booking), which left the activity log's own
+    // message generic ("New booking on <date> at <time>", no client or service) no
+    // matter who the booking was for.
+    let customerName = guestInfo?.name ?? 'A customer';
+    if (userId) {
+      const customer = await usersCollection().findOne(
+        { _id: new ObjectId(userId) },
+        { projection: { firstName: 1, lastName: 1 } }
+      );
+      if (customer) customerName = `${customer.firstName} ${customer.lastName}`;
+    }
+    const serviceNames = quote.services.map((s) => s.name).join(', ');
+
     await logActivity({
       type: 'booking_created',
-      message: `New booking on ${date} at ${startTime}${createdByAdminId ? ' (created by admin)' : ''}`,
+      message: `New booking: ${customerName} — ${serviceNames} on ${date} at ${startTime}${createdByAdminId ? ' (created by admin)' : ''}`,
       actorUserId: createdByAdminId ?? userId ?? null,
       metadata: { appointmentId: String(insertedId) },
     });
     // Only for a customer's own booking — an admin booking on a client's behalf already
     // knows about it, so notifying them too would just be noise.
     if (!createdByAdminId) {
-      let customerName = guestInfo?.name ?? 'A customer';
-      if (userId) {
-        const customer = await usersCollection().findOne(
-          { _id: new ObjectId(userId) },
-          { projection: { firstName: 1, lastName: 1 } }
-        );
-        if (customer) customerName = `${customer.firstName} ${customer.lastName}`;
-      }
       await notifyAdminsOfNewBooking({ customerName, date, startTime });
     }
     return { ...doc, _id: insertedId };
@@ -539,9 +564,10 @@ export async function completeAppointment({ appointmentId, actor }) {
     { $set: { status: APPOINTMENT_STATUS.COMPLETED, completedAt: new Date(), updatedAt: new Date() } }
   );
 
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type: 'booking_completed',
-    message: `Booking on ${appointment.date} at ${appointment.startTime} marked completed by admin`,
+    message: `Booking for ${clientName} on ${appointment.date} at ${appointment.startTime} marked completed by admin`,
     actorUserId: actor._id,
     metadata: { appointmentId: String(appointment._id) },
   });
@@ -580,9 +606,10 @@ export async function cancelAppointment({ appointmentId, actor, reason }) {
     }
   );
 
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type: 'booking_cancelled',
-    message: `Booking on ${appointment.date} at ${appointment.startTime} cancelled${actor.role === 'admin' ? ' by admin' : ''}`,
+    message: `Booking for ${clientName} on ${appointment.date} at ${appointment.startTime} cancelled${actor.role === 'admin' ? ' by admin' : ''}`,
     actorUserId: actor._id,
     metadata: { appointmentId: String(appointment._id), reason: reason ?? null },
   });

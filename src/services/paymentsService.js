@@ -5,7 +5,7 @@ import { usersCollection } from '../models/users.js';
 import * as defaultYoco from '../config/yocoClient.js';
 import { createClientNotification } from './clientNotificationsService.js';
 import { logActivity } from './activityLogService.js';
-import { checkSlotBookable, cancelUnviableAppointment } from './bookingService.js';
+import { checkSlotBookable, cancelUnviableAppointment, resolveClientName } from './bookingService.js';
 import { timeRangesOverlap } from '../utils/businessTime.js';
 import { awardPoints, previewRedemption, redeemPoints, creditBackPoints } from './loyaltyService.js';
 import { completeReferralIfPending } from './referralService.js';
@@ -470,9 +470,10 @@ async function confirmAppointmentForPaidDeposit(updated) {
     if (current) {
       await cancelUnviableAppointment(current, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
     }
+    const clientName = current ? await resolveClientName(current) : 'a customer';
     await logActivity({
       type: 'payment_needs_review',
-      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for the same slot by the time it processed. Needs manual refund.`,
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} from ${clientName} was received, but another booking had already been confirmed for the same slot by the time it processed. Needs manual refund.`,
       actorUserId: current?.userId ?? null,
       metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
     });
@@ -488,9 +489,10 @@ async function confirmAppointmentForPaidDeposit(updated) {
     // Surface it for manual follow-up rather than silently dropping a paid-but-
     // unconfirmed booking.
     const current = await appointmentsCollection().findOne({ _id: updated.appointmentId });
+    const clientName = current ? await resolveClientName(current) : 'a customer';
     await logActivity({
       type: 'payment_needs_review',
-      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but its appointment is no longer awaiting payment (status: ${current?.status ?? 'unknown'}). Needs manual refund or rebooking.`,
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} from ${clientName} was received, but its appointment is no longer awaiting payment (status: ${current?.status ?? 'unknown'}). Needs manual refund or rebooking.`,
       actorUserId: current?.userId ?? null,
       metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
     });
@@ -499,9 +501,10 @@ async function confirmAppointmentForPaidDeposit(updated) {
 
   if (result.outcome === 'overlap') {
     await cancelUnviableAppointment(result.pending, 'This slot was taken by another confirmed booking before this payment could be confirmed.');
+    const clientName = await resolveClientName(result.pending);
     await logActivity({
       type: 'payment_needs_review',
-      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} was received, but another booking had already been confirmed for an overlapping slot by the time it processed. Needs manual refund.`,
+      message: `Payment of R${(updated.amountCents / 100).toFixed(2)} from ${clientName} was received, but another booking had already been confirmed for an overlapping slot by the time it processed. Needs manual refund.`,
       actorUserId: result.pending.userId ?? null,
       metadata: { paymentId: String(updated._id), appointmentId: String(updated.appointmentId) },
     });
@@ -536,9 +539,10 @@ async function confirmAppointmentForPaidDeposit(updated) {
 
     await completeReferralIfPending(appointment.userId);
   }
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type: 'payment_received',
-    message: `Deposit of R${(updated.amountCents / 100).toFixed(2)} received for booking on ${appointment.date}`,
+    message: `Deposit of R${(updated.amountCents / 100).toFixed(2)} received from ${clientName} for booking on ${appointment.date} at ${appointment.startTime}`,
     actorUserId: appointment.userId,
     metadata: { paymentId: String(updated._id), appointmentId: String(appointment._id) },
   });
@@ -593,9 +597,10 @@ export async function recordManualPayment({ appointmentId, amount, actor }) {
 
   await confirmAppointmentForPaidDeposit(inserted);
 
+  const clientName = await resolveClientName(appointment);
   await logActivity({
     type: 'payment_received',
-    message: `Cash payment of R${(amountCents / 100).toFixed(2)} recorded by admin for booking on ${appointment.date} at ${appointment.startTime}`,
+    message: `Cash payment of R${(amountCents / 100).toFixed(2)} recorded by admin for ${clientName}'s booking on ${appointment.date} at ${appointment.startTime}`,
     actorUserId: actor._id,
     metadata: { paymentId: String(insertedId), appointmentId: String(appointment._id) },
   });
